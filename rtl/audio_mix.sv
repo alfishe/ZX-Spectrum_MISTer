@@ -38,29 +38,33 @@ module audio_mix
 );
 
 // ============================================================================
-// STAGE 1: Wide accumulator mixing
+// STAGE 1: Wide accumulator mixing with DC centering
 // ============================================================================
-// Scale all sources to common 18-bit range before summing
-// This prevents any overflow during mixing
+// P0.1 FIX: All sources must be centered (zero DC) before mixing
+// Otherwise the soft limiter works asymmetrically causing distortion
 
-// Turbosound: 13-bit -> shift left 5 to use most of 18-bit range
-// Max single AY = ~2047, dual AY = ~4094, after <<5 = ~131000
-wire signed [17:0] ts_scaled_l = {ts_l, 5'b0};
-wire signed [17:0] ts_scaled_r = {ts_r, 5'b0};
+// Turbosound: 13-bit from turbosound.sv
+// ts is unsigned PSG (0..1530) + signed FM
+// PSG midpoint = 765, so center by subtracting 765<<5 = 24480
+// After centering: range roughly [-24480, +24480] for PSG alone
+localparam signed [17:0] TS_DC_OFFSET = 18'sd24480;  // 765 * 32
 
-// General Sound: 15-bit -> shift left 2 (GS is already loud, don't over-boost)
-// Max = 16383, after <<2 = 65532
-wire signed [17:0] gs_scaled_l = {{3{gs_l[14]}}, gs_l};  // Just sign-extend, GS is already at good level
+wire signed [17:0] ts_scaled_l = {ts_l, 5'b0} - TS_DC_OFFSET;
+wire signed [17:0] ts_scaled_r = {ts_r, 5'b0} - TS_DC_OFFSET;
+
+// General Sound: 15-bit signed - already centered, just sign-extend
+wire signed [17:0] gs_scaled_l = {{3{gs_l[14]}}, gs_l};
 wire signed [17:0] gs_scaled_r = {{3{gs_r[14]}}, gs_r};
 
-// SAA1099: 8-bit unsigned -> convert to signed, shift left 8
-// Max = 255, after <<8 = 65280 (but centered at 32640)
-wire signed [17:0] saa_scaled_l = {2'b0, saa_l, 8'b0} - 18'sd32640;  // Center around 0
-wire signed [17:0] saa_scaled_r = {2'b0, saa_r, 8'b0} - 18'sd32640;
+// SAA1099: 8-bit unsigned -> center by subtracting midpoint
+// Midpoint = 128, after <<8 = 32768
+wire signed [17:0] saa_scaled_l = {2'b0, saa_l, 8'b0} - 18'sd32768;
+wire signed [17:0] saa_scaled_r = {2'b0, saa_r, 8'b0} - 18'sd32768;
 
-// Beeper: 3-bit -> shift left 13 for appropriate level
-// Max = 7, after <<13 = 57344
-wire signed [17:0] beeper_scaled = {3'b0, beeper, 12'b0};
+// Beeper: 3-bit unsigned (0-7) -> center by subtracting midpoint
+// Midpoint = 3.5, use 4 for simplicity. After <<12 = 16384
+// Range after centering: [-16384, +12288]
+wire signed [17:0] beeper_scaled = ({3'b0, beeper, 12'b0} - 18'sd16384);
 
 // Sum all sources (19 bits to handle overflow)
 wire signed [18:0] sum_l = ts_scaled_l + gs_scaled_l + saa_scaled_l + beeper_scaled;

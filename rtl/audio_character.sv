@@ -46,49 +46,48 @@ wire room_en  = mode[1];
 reg signed [15:0] prev_l, prev_r;
 reg signed [31:0] env_l, env_r;  // 16.16 fixed point envelope
 
-wire signed [15:0] diff_l = $signed(in_l) - prev_l;
-wire signed [15:0] diff_r = $signed(in_r) - prev_r;
+// P0.2 FIX: diff needs 17 bits to handle full range transitions without overflow
+wire signed [16:0] diff_l = $signed(in_l) - $signed(prev_l);
+wire signed [16:0] diff_r = $signed(in_r) - $signed(prev_r);
 
-// Magnitude (abs value)
-wire [15:0] mag_l = diff_l[15] ? -diff_l : diff_l;
-wire [15:0] mag_r = diff_r[15] ? -diff_r : diff_r;
+// Magnitude (abs value) - 17-bit
+wire [16:0] mag_l = diff_l[16] ? -diff_l : diff_l;
+wire [16:0] mag_r = diff_r[16] ? -diff_r : diff_r;
 
-// Edge component: ~0.03 blend -> (x>>5) ~= 0.03125
-wire signed [15:0] edge_l = diff_l >>> 5;
-wire signed [15:0] edge_r = diff_r >>> 5;
+// Edge component: ~0.03 blend -> (x>>5) ~= 0.03125 (AY preset from unreal-ng)
+wire signed [16:0] edge_l = diff_l >>> 5;
+wire signed [16:0] edge_r = diff_r >>> 5;
 
-// Envelope follower attack/release
-// Attack: env = mag * 0.3 + env * 0.7 when mag > env
-//       -> ({mag,16'b0}>>2) + (env>>1) + (env>>3)  = 0.25 + 0.5 + 0.125 = 0.875 (too high)
-//       -> better: (mag<<15) + (env>>1) ~= 50% attack
+// Envelope follower attack/release (AY preset: attack=0.3, release=0.9995)
+// Attack: env = mag * 0.3 + env * 0.7
 // Release: env = env * 0.9995 ~= env - (env>>11)
-wire signed [31:0] mag_l_ext = {mag_l, 16'b0};
-wire signed [31:0] mag_r_ext = {mag_r, 16'b0};
+wire signed [32:0] mag_l_ext = {mag_l, 16'b0};
+wire signed [32:0] mag_r_ext = {mag_r, 16'b0};
 
-wire signed [31:0] env_attack_l = (mag_l_ext >>> 2) + (env_l >>> 1) + (env_l >>> 2);
-wire signed [31:0] env_attack_r = (mag_r_ext >>> 2) + (env_r >>> 1) + (env_r >>> 2);
-wire signed [31:0] env_release_l = env_l - (env_l >>> 11);
+wire signed [31:0] env_attack_l = (mag_l_ext[31:0] >>> 2) + (env_l >>> 1) + (env_l >>> 3);  // 0.25 + 0.5 + 0.125 ≈ 0.3 blend
+wire signed [31:0] env_attack_r = (mag_r_ext[31:0] >>> 2) + (env_r >>> 1) + (env_r >>> 3);
+wire signed [31:0] env_release_l = env_l - (env_l >>> 11);  // 0.9995
 wire signed [31:0] env_release_r = env_r - (env_r >>> 11);
 
-// Transient component: diff * env * ~0.1
-// env is 16.16, we want result in 16-bit
-// (diff * env[31:16]) >> 3 ~= 0.125 boost
-wire signed [31:0] trans_mult_l = diff_l * env_l[31:16];
-wire signed [31:0] trans_mult_r = diff_r * env_r[31:16];
-wire signed [15:0] trans_l = trans_mult_l[31:16] >>> 3;
-wire signed [15:0] trans_r = trans_mult_r[31:16] >>> 3;
+// Transient component: diff * env * ~0.1 (AY preset: transBoost=0.1)
+// env is 16.16, diff is 17-bit
+// (diff * env[31:16]) >> 4 ~= 0.0625 boost (conservative for AY)
+wire signed [32:0] trans_mult_l = diff_l * $signed(env_l[31:16]);
+wire signed [32:0] trans_mult_r = diff_r * $signed(env_r[31:16]);
+wire signed [16:0] trans_l = trans_mult_l[32:16] >>> 4;
+wire signed [16:0] trans_r = trans_mult_r[32:16] >>> 4;
 
-// Punch output with saturation
-wire signed [17:0] punch_sum_l = $signed({in_l[15], in_l[15], in_l}) + $signed({edge_l[15], edge_l[15], edge_l}) + $signed({trans_l[15], trans_l[15], trans_l});
-wire signed [17:0] punch_sum_r = $signed({in_r[15], in_r[15], in_r}) + $signed({edge_r[15], edge_r[15], edge_r}) + $signed({trans_r[15], trans_r[15], trans_r});
+// Punch output with saturation (wider accumulator for 17-bit components)
+wire signed [18:0] punch_sum_l = $signed({in_l[15], in_l[15], in_l[15], in_l}) + $signed({edge_l[16], edge_l[16], edge_l}) + $signed({trans_l[16], trans_l[16], trans_l});
+wire signed [18:0] punch_sum_r = $signed({in_r[15], in_r[15], in_r[15], in_r}) + $signed({edge_r[16], edge_r[16], edge_r}) + $signed({trans_r[16], trans_r[16], trans_r});
 
-// Saturate to 16-bit
+// Saturate to 16-bit (handles 19-bit input)
 function [15:0] saturate;
-    input signed [17:0] val;
+    input signed [18:0] val;
     begin
-        if (val > 18'sd32767)
+        if (val > 19'sd32767)
             saturate = 16'sd32767;
-        else if (val < -18'sd32768)
+        else if (val < -19'sd32768)
             saturate = -16'sd32768;
         else
             saturate = val[15:0];

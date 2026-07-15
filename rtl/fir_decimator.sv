@@ -27,8 +27,9 @@ module fir_decimator
 );
 
 // Decimation: 218750 Hz -> 48000 Hz = 4.557291... ratio
-// Phase increment = 48000/218750 * 2^24 = 3679126.4
-localparam [24:0] PHASE_INCR = 25'd3679126;
+// Phase increment = 48000/218750 * 2^24 = 3681401.14
+// P0.3 FIX: Corrected from 3679126 to 3681401
+localparam [24:0] PHASE_INCR = 25'd3681401;
 localparam [24:0] PHASE_MAX  = 25'h1000000;
 
 // 96-tap FIR coefficients from unreal-ng filter_decimator.h
