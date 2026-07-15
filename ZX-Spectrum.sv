@@ -83,6 +83,10 @@ localparam CONF_STR = {
 	"P1O[39],PSG/FM,Enabled,Disabled;",
 	"P1O[40],PSG Stereo,ABC,ACB;",
 	"P1O[41],PSG Model,YM2149,AY8910;",
+	"P1-;",
+	"P1O[43:42],Audio Character,Clean,Punch,Room,Punch+Room;",
+	"P1O[45:44],Room Level,-15dB,-14dB,-12dB,-9dB;",
+	"P1O[46],Audio Filter,IIR (MiSTer),FIR (Unreal);",
 
 	"P2,Hardware;",
 	"P2-;",
@@ -723,14 +727,91 @@ function [15:0] compr; input [15:0] inp;
 	end
 endfunction
 
+// CE at PSG generator rate (~218.75kHz = 3.5MHz / 16)
+// This matches unreal-ng's PSG_CLOCK_RATE/8 = 1.75MHz/8 = 218.75kHz
+reg ce_psg_gen;
+always @(posedge clk_aud) begin
+	reg [7:0] cnt = 0;
+	ce_psg_gen <= 0;
+	if (ce_ym) begin
+		cnt <= cnt + 1'd1;
+		if (cnt[3:0] == 4'd15) begin  // Divide ce_ym by 16 -> 3.5MHz/16 = 218.75kHz
+			ce_psg_gen <= 1;
+		end
+	end
+end
+
+// Audio mixing at PSG generator rate
+reg [15:0] mix_l, mix_r;
+always @(posedge clk_aud) begin
+	mix_l <= {ts_l,4'd0} + {{3{gs_l[14]}}, gs_l[13:1]} + {2'b00, saa_l, 6'd0} + {3'b000, ear_out, mic_out, tape_aud, 10'd0};
+	mix_r <= {ts_r,4'd0} + {{3{gs_r[14]}}, gs_r[13:1]} + {2'b00, saa_r, 6'd0} + {3'b000, ear_out, mic_out, tape_aud, 10'd0};
+end
+
+// FIR decimation path (matches unreal-ng 96-tap Kaiser filter)
+// Input: 218.75kHz, Output: 48kHz
+wire        fir_valid;
+wire [15:0] fir_l, fir_r;
+fir_decimator fir_decimator
+(
+	.clk(clk_aud),
+	.reset(aud_reset),
+	.in_ce(ce_psg_gen),
+	.in_l(mix_l),
+	.in_r(mix_r),
+	.out_valid(fir_valid),
+	.out_l(fir_l),
+	.out_r(fir_r)
+);
+
+// Hold FIR output for continuous stream
+reg [15:0] fir_hold_l, fir_hold_r;
+always @(posedge clk_aud) begin
+	if (fir_valid) begin
+		fir_hold_l <= fir_l;
+		fir_hold_r <= fir_r;
+	end
+end
+
+// Select filtered or raw path based on status[46]
+wire use_fir = status[46];
+wire [15:0] filt_l = use_fir ? fir_hold_l : mix_l;
+wire [15:0] filt_r = use_fir ? fir_hold_r : mix_r;
+
+// CE for audio character processing (~48kHz from 56MHz)
+reg ce_audio_char;
+always @(posedge clk_aud) begin
+	reg [10:0] cnt = 0;
+	ce_audio_char <= 0;
+	cnt <= cnt + 11'd1;
+	if (cnt >= 11'd1166) begin  // 56MHz / 48kHz ~= 1166.67
+		cnt <= 0;
+		ce_audio_char <= 1;
+	end
+end
+
+// Audio character processing (punch/room)
+wire [15:0] char_l, char_r;
+audio_character audio_character
+(
+	.clk(clk_aud),
+	.ce(ce_audio_char),
+	.reset(aud_reset),
+
+	.mode(status[43:42]),
+	.room_level(status[45:44]),
+
+	.in_l(filt_l),
+	.in_r(filt_r),
+	.out_l(char_l),
+	.out_r(char_r)
+);
+
+// Soft limiter/compressor
 reg [15:0] audio_l, audio_r;
 always @(posedge clk_aud) begin
-	reg [15:0] pre_l, pre_r;
-	pre_l <= {ts_l,4'd0} + {{3{gs_l[14]}}, gs_l[13:1]} + {2'b00, saa_l, 6'd0} + {3'b000, ear_out, mic_out, tape_aud, 10'd0};
-	pre_r <= {ts_r,4'd0} + {{3{gs_r[14]}}, gs_r[13:1]} + {2'b00, saa_r, 6'd0} + {3'b000, ear_out, mic_out, tape_aud, 10'd0};
-
-	audio_l <= compr(pre_l);
-	audio_r <= compr(pre_r);
+	audio_l <= compr(char_l);
+	audio_r <= compr(char_r);
 end
 
 assign AUDIO_L = audio_l;
