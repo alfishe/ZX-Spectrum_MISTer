@@ -784,14 +784,18 @@ wire use_fir = status[46];
 wire [15:0] filt_l = use_fir ? fir_hold_l : mix_l;
 wire [15:0] filt_r = use_fir ? fir_hold_r : mix_r;
 
-// CE for audio character processing (~48kHz from 56MHz)
+// CE for audio character processing (48kHz from 56MHz via fractional accumulator)
+// Same technique as FIR decimator - exact ratio, no beat frequency
+// Phase increment = 48000/56000000 * 2^24 = 14380.47
+localparam [24:0] CE_PHASE_INCR = 25'd14380;
+localparam [24:0] CE_PHASE_MAX  = 25'h1000000;
 reg ce_audio_char;
+reg [24:0] ce_phase;
 always @(posedge clk_aud) begin
-	reg [10:0] cnt = 0;
 	ce_audio_char <= 0;
-	cnt <= cnt + 11'd1;
-	if (cnt >= 11'd1166) begin  // 56MHz / 48kHz ~= 1166.67
-		cnt <= 0;
+	ce_phase <= ce_phase + CE_PHASE_INCR;
+	if (ce_phase >= CE_PHASE_MAX - CE_PHASE_INCR) begin
+		ce_phase <= ce_phase + CE_PHASE_INCR - CE_PHASE_MAX;
 		ce_audio_char <= 1;
 	end
 end
@@ -813,15 +817,11 @@ audio_character audio_character
 	.out_r(char_r)
 );
 
-// Output registers (soft limiting already done in audio_mix)
-reg [15:0] audio_l, audio_r;
-always @(posedge clk_aud) begin
-	audio_l <= char_l;
-	audio_r <= char_r;
-end
-
-assign AUDIO_L = audio_l;
-assign AUDIO_R = audio_r;
+// Output: use character output for modes 1-3, direct bypass for Clean (mode 0)
+// Clean mode is combinational bypass - no latching on CE edges
+wire clean_mode = (status[43:42] == 2'b00);
+assign AUDIO_L = clean_mode ? filt_l : char_l;
+assign AUDIO_R = clean_mode ? filt_r : char_r;
 
 
 ////////////////////   VIDEO   ///////////////////
