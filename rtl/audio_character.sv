@@ -6,11 +6,15 @@
 // - Punch enhancement: transient designer + edge exciter
 // - Room simulation: crossfeed for headphone listening
 //
-// Parameters matched to unreal-ng AY preset for cross-verification:
+// AY preset parameters (matched to unreal-ng for cross-verification):
 // - edgeBlend  = 0.03125 (>>5)
-// - transBoost = 0.0625  (>>4 on normalized envelope)
+// - transBoost = 0.03125 (env_int/2^20, env clamped to 32767)
 // - attack     = 0.3125  (>>2 + >>4)
 // - release    = 0.9995  (1 - >>11)
+//
+// Note: transBoost effective value is 2^15/2^20 = 0.03125 because envelope
+// is clamped to half-scale (32767). unreal-ng C++ should add env = min(env, 1.0)
+// to match this behavior for bit-exact verification.
 //============================================================================
 
 module audio_character

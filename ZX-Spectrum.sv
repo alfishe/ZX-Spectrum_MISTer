@@ -770,35 +770,48 @@ fir_decimator fir_decimator
 	.out_r(fir_r)
 );
 
-// Hold FIR output for continuous stream
+// Select filter mode based on status[46]
+wire use_fir = status[46];
+
+// Hold FIR output for continuous stream (needed for Clean mode bypass)
 reg [15:0] fir_hold_l, fir_hold_r;
 always @(posedge clk_aud) begin
-	if (fir_valid) begin
+	if (aud_reset) begin
+		fir_hold_l <= 0;
+		fir_hold_r <= 0;
+	end
+	else if (fir_valid) begin
 		fir_hold_l <= fir_l;
 		fir_hold_r <= fir_r;
 	end
 end
 
-// Select filtered or raw path based on status[46]
-wire use_fir = status[46];
-wire [15:0] filt_l = use_fir ? fir_hold_l : mix_l;
-wire [15:0] filt_r = use_fir ? fir_hold_r : mix_r;
-
-// CE for audio character processing (48kHz from 56MHz via fractional accumulator)
-// Same technique as FIR decimator - exact ratio, no beat frequency
-// Phase increment = 48000/56000000 * 2^24 = 14380.47
-localparam [24:0] CE_PHASE_INCR = 25'd14380;
-localparam [24:0] CE_PHASE_MAX  = 25'h1000000;
+// CE for audio character processing
+// In FIR mode: use fir_valid directly (data-aligned, zero drift)
+// In IIR mode: modular counter 3/3500 = exact 48000.000 Hz from 56MHz
 reg ce_audio_char;
-reg [24:0] ce_phase;
+reg [11:0] ce_cnt;
 always @(posedge clk_aud) begin
-	ce_audio_char <= 0;
-	ce_phase <= ce_phase + CE_PHASE_INCR;
-	if (ce_phase >= CE_PHASE_MAX - CE_PHASE_INCR) begin
-		ce_phase <= ce_phase + CE_PHASE_INCR - CE_PHASE_MAX;
-		ce_audio_char <= 1;
+	if (aud_reset) begin
+		ce_cnt <= 0;
+		ce_audio_char <= 0;
+	end
+	else if (use_fir) begin
+		ce_audio_char <= fir_valid;
+	end
+	else begin
+		ce_audio_char <= 0;
+		ce_cnt <= ce_cnt + 12'd3;
+		if (ce_cnt >= 12'd3497) begin  // 3500 - 3
+			ce_cnt <= ce_cnt + 12'd3 - 12'd3500;
+			ce_audio_char <= 1;
+		end
 	end
 end
+
+// In FIR mode, pass FIR output directly to character (no hold needed)
+wire [15:0] char_in_l = use_fir ? fir_l : mix_l;
+wire [15:0] char_in_r = use_fir ? fir_r : mix_r;
 
 // Audio character processing (punch/room)
 wire [15:0] char_l, char_r;
@@ -811,17 +824,19 @@ audio_character audio_character
 	.mode(status[43:42]),
 	.room_level(status[45:44]),
 
-	.in_l(filt_l),
-	.in_r(filt_r),
+	.in_l(char_in_l),
+	.in_r(char_in_r),
 	.out_l(char_l),
 	.out_r(char_r)
 );
 
 // Output: use character output for modes 1-3, direct bypass for Clean (mode 0)
-// Clean mode is combinational bypass - no latching on CE edges
+// Clean mode bypasses audio_character entirely
 wire clean_mode = (status[43:42] == 2'b00);
-assign AUDIO_L = clean_mode ? filt_l : char_l;
-assign AUDIO_R = clean_mode ? filt_r : char_r;
+wire [15:0] bypass_l = use_fir ? fir_hold_l : mix_l;
+wire [15:0] bypass_r = use_fir ? fir_hold_r : mix_r;
+assign AUDIO_L = clean_mode ? bypass_l : char_l;
+assign AUDIO_R = clean_mode ? bypass_r : char_r;
 
 
 ////////////////////   VIDEO   ///////////////////
