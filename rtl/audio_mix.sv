@@ -201,20 +201,21 @@ always @(*) begin
     endcase
 end
 
-// Smoothed gain (one-pole, tau ~85ms at 48kHz)
-// gain_cur is unsigned 17-bit (0..65536 = 0.0..1.0 in 16.16 fixed point)
-reg [16:0] gain_cur;
+// Smoothed gain: one-pole, tau ~85ms @ 48kHz, exact convergence
+// gain_acc is 17.12 fixed point: integer part = gain in 16.16 units (0..65536)
+// Fractional accumulation guarantees exact convergence with no dead zone:
+// - While gain_cur != target, |delta| >= 1, so accumulator always moves
+// - When gain_cur == target, delta == 0: no oscillation, monotonic convergence
+// - Overflow-free: max accumulator = 65536<<12 = 2^28, fits in 29 bits
+reg  [28:0] gain_acc;
+wire [16:0] gain_cur = gain_acc[28:12];
 wire signed [17:0] gain_delta = $signed({1'b0, gain_target}) - $signed({1'b0, gain_cur});
 
 always @(posedge clk) begin
-    if (reset) begin
-        gain_cur <= 17'd65536;  // Start at unity
-    end
-    else if (ce) begin
-        // Rounding: +2048 ensures upward slew reaches target exactly
-        // Without it, positive delta < 4096 gives shift result 0
-        gain_cur <= gain_cur + ((gain_delta + 18'sd2048) >>> 12);
-    end
+    if (reset)
+        gain_acc <= 29'd65536 << 12;
+    else if (ce)
+        gain_acc <= gain_acc + {{11{gain_delta[17]}}, gain_delta};
 end
 
 // ============================================================================
