@@ -35,8 +35,8 @@ module turbosound
 	input   [7:0] DI,	       // Data In
 	output  [7:0] DO,	       // Data Out
 
-	output [11:0] CHANNEL_L, // Output channel L
-	output [11:0] CHANNEL_R  // Output channel R
+	output [12:0] CHANNEL_L, // Output channel L (13-bit for full 2xAY + FM range)
+	output [12:0] CHANNEL_R  // Output channel R
 );
 
 
@@ -156,27 +156,49 @@ jt03 ym2203_1
 
 assign DO = ay_select ? DO_1 : DO_0;
 
-reg  [8:0] sum_ch_a,sum_ch_b,sum_ch_c;
-reg  [7:0] psg_a,psg_b,psg_c;
-reg [11:0] psg_l,psg_r,opn_s;
-reg [11:0] ch_l, ch_r;
+// Sum channels from both AY chips WITHOUT saturation
+// This preserves full dynamic range when both chips are active
+reg  [8:0] sum_ch_a, sum_ch_b, sum_ch_c;
+
+// Stereo mix registers - wider to handle full 2xAY range
+// Max per channel: 510 (9-bit), stereo mix: 510*2 + 510 = 1530 (11-bit)
+reg [10:0] psg_l, psg_r;
+
+// FM sum (signed)
+reg signed [11:0] opn_s;
+
+// Output registers (13-bit signed to handle PSG + FM)
+reg signed [12:0] ch_l, ch_r;
 
 always @(posedge CLK) begin
-
+	// Sum channels without clipping (9-bit result, range 0-510)
 	sum_ch_a <= { 1'b0, psg_ch_a_1 } + { 1'b0, psg_ch_a_0 };
 	sum_ch_b <= { 1'b0, psg_ch_b_1 } + { 1'b0, psg_ch_b_0 };
 	sum_ch_c <= { 1'b0, psg_ch_c_1 } + { 1'b0, psg_ch_c_0 };
 
-	psg_a <= sum_ch_a[8] ? 8'hFF : sum_ch_a[7:0];
-	psg_b <= sum_ch_b[8] ? 8'hFF : sum_ch_b[7:0];
-	psg_c <= sum_ch_c[8] ? 8'hFF : sum_ch_c[7:0];
+	// Stereo mix: A*2+B for left, C*2+B for right (ABC mode)
+	// Or B*2+C for left, A*2+C for right (ACB mode when PSG_MIX=1)
+	// Using full 9-bit sums, output is 11-bit (max 1530)
+	psg_l <= {sum_ch_a, 1'd0} + {2'b00, PSG_MIX ? sum_ch_c : sum_ch_b};
+	psg_r <= {(PSG_MIX ? sum_ch_b : sum_ch_c), 1'd0} + {2'b00, PSG_MIX ? sum_ch_c : sum_ch_b};
 
-	psg_l <= {3'b000,                   psg_a, 1'd0} + {4'b0000, PSG_MIX ? psg_c : psg_b};
-	psg_r <= {3'b000, PSG_MIX ? psg_b : psg_c, 1'd0} + {4'b0000, PSG_MIX ? psg_c : psg_b};
+	// FM sum (both chips)
 	opn_s <= {{2{opn_0[15]}}, opn_0[15:6]} + {{2{opn_1[15]}}, opn_1[15:6]};
 
-	ch_l <= ~ENABLE ? 12'd0 : fm_ena ? $signed(opn_s) + $signed(psg_l) : $signed(psg_l);
-	ch_r <= ~ENABLE ? 12'd0 : fm_ena ? $signed(opn_s) + $signed(psg_r) : $signed(psg_r);
+	// Final output: PSG (unsigned 11-bit) + FM (signed 12-bit)
+	// Convert PSG to signed and add FM
+	if (~ENABLE) begin
+		ch_l <= 13'sd0;
+		ch_r <= 13'sd0;
+	end
+	else if (fm_ena) begin
+		ch_l <= $signed({2'b0, psg_l}) + $signed({opn_s[11], opn_s});
+		ch_r <= $signed({2'b0, psg_r}) + $signed({opn_s[11], opn_s});
+	end
+	else begin
+		ch_l <= $signed({2'b0, psg_l});
+		ch_r <= $signed({2'b0, psg_r});
+	end
 end
 
 assign CHANNEL_L = ch_l;

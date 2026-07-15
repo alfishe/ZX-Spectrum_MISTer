@@ -584,7 +584,7 @@ end
 
 ////////////////////   AUDIO   ///////////////////
 wire  [7:0] psg_dout;
-wire [11:0] ts_l, ts_r;
+wire [12:0] ts_l, ts_r;  // 13-bit signed for full 2xAY + FM range
 wire        psg_sel = /*addr[0] &*/ addr[15] & ~addr[1];
 wire        psg_we  = psg_sel & ~nIORQ & ~nWR & nM1;
 wire        psg_rd  = psg_sel & addr[14];
@@ -713,20 +713,6 @@ ddram ddram
 
 wire gs_sel = (addr[7:0] ==? 'b1011?011) & ~&status[21:20];
 
-localparam [3:0] comp_f = 4;
-localparam [3:0] comp_a = 2;
-localparam       comp_x = ((32767 * (comp_f - 1)) / ((comp_f * comp_a) - 1)) + 1; // +1 to make sure it won't overflow
-localparam       comp_b = comp_x * comp_a;
-
-function [15:0] compr; input [15:0] inp;
-	reg [15:0] v, v2;
-	begin
-		v  = inp[15] ? (~inp) + 1'd1 : inp;
-		v2 = (v < comp_x[15:0]) ? (v * comp_a) : (((v - comp_x[15:0])/comp_f) + comp_b[15:0]);
-		compr = inp[15] ? ~(v2-1'd1) : v2;
-	end
-endfunction
-
 // CE at PSG generator rate (~218.75kHz = 3.5MHz / 16)
 // This matches unreal-ng's PSG_CLOCK_RATE/8 = 1.75MHz/8 = 218.75kHz
 reg ce_psg_gen;
@@ -741,12 +727,32 @@ always @(posedge clk_aud) begin
 	end
 end
 
-// Audio mixing at PSG generator rate
-reg [15:0] mix_l, mix_r;
-always @(posedge clk_aud) begin
-	mix_l <= {ts_l,4'd0} + {{3{gs_l[14]}}, gs_l[13:1]} + {2'b00, saa_l, 6'd0} + {3'b000, ear_out, mic_out, tape_aud, 10'd0};
-	mix_r <= {ts_r,4'd0} + {{3{gs_r[14]}}, gs_r[13:1]} + {2'b00, saa_r, 6'd0} + {3'b000, ear_out, mic_out, tape_aud, 10'd0};
-end
+// Audio mixer with soft limiter (handles all sources, no clipping)
+wire [15:0] mix_l, mix_r;
+audio_mix audio_mix
+(
+	.clk(clk_aud),
+	.reset(aud_reset),
+
+	// Turbosound (13-bit signed, full 2xAY + FM range)
+	.ts_l(ts_l),
+	.ts_r(ts_r),
+
+	// General Sound (15-bit signed)
+	.gs_l(gs_l),
+	.gs_r(gs_r),
+
+	// SAA1099 (8-bit unsigned)
+	.saa_l(saa_l),
+	.saa_r(saa_r),
+
+	// Beeper (combined)
+	.beeper({ear_out, mic_out, tape_aud}),
+
+	// Output (16-bit signed, soft-limited)
+	.out_l(mix_l),
+	.out_r(mix_r)
+);
 
 // FIR decimation path (matches unreal-ng 96-tap Kaiser filter)
 // Input: 218.75kHz, Output: 48kHz
@@ -807,11 +813,11 @@ audio_character audio_character
 	.out_r(char_r)
 );
 
-// Soft limiter/compressor
+// Output registers (soft limiting already done in audio_mix)
 reg [15:0] audio_l, audio_r;
 always @(posedge clk_aud) begin
-	audio_l <= compr(char_l);
-	audio_r <= compr(char_r);
+	audio_l <= char_l;
+	audio_r <= char_r;
 end
 
 assign AUDIO_L = audio_l;
