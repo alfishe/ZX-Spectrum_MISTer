@@ -1,20 +1,29 @@
 //============================================================================
-// Audio Mixer with DC Blocker and Soft Limiter for MiSTer ZX Spectrum
+// Audio Mixer with DC Blocker, Gain Staging, and Soft Limiter
+// for MiSTer ZX Spectrum
 //
 // Features:
 // - DC blocker (leaky integrator) for unipolar sources
+// - Activity-dependent gain staging (no limiter pumping)
 // - Wide accumulator mixing (no early clipping)
-// - Piecewise linear soft limiter (transparent, no pumping)
-// - Consistent loudness whether 1 or 2 AYs active
+// - Piecewise linear soft limiter (emergency only)
 //
 // Signal flow:
-//   [Sources] -> [Scale] -> [DC Block] -> [Wide Mix] -> [Soft Limit] -> [Output]
+//   [Sources] -> [Scale] -> [DC Block] -> [Activity Detect] ->
+//   [Gain Stage] -> [Wide Mix] -> [Soft Limit] -> [Output]
+//
+// Relative levels matched to master:
+//   TS:     <<5 (13-bit -> 18-bit)
+//   GS:     sign-extend (15-bit -> 18-bit, effectively <<3)
+//   SAA:    <<7 (8-bit -> 15-bit in 18-bit field)
+//   Beeper: <<7 (7-bit boxcar sum -> 14-bit in 18-bit field)
 //============================================================================
 
 module audio_mix
 (
     input             clk,
     input             reset,
+    input             ce,          // 48kHz CE for gain smoothing
 
     // Turbosound (2x AY mixed, 13-bit signed from turbosound.sv)
     input signed [12:0] ts_l,
@@ -28,8 +37,8 @@ module audio_mix
     input        [7:0] saa_l,
     input        [7:0] saa_r,
 
-    // Beeper/tape (directly combined as 3-bit level)
-    input        [2:0] beeper,
+    // Beeper (7-bit boxcar sum of 16 samples)
+    input        [6:0] beeper,
 
     // Output (16-bit signed, soft-limited)
     output reg signed [15:0] out_l,
@@ -37,55 +46,49 @@ module audio_mix
 );
 
 // ============================================================================
-// STAGE 1: Scale all sources to common 18-bit range
+// STAGE 1: Scale all sources (matched to master levels)
 // ============================================================================
 
-// Turbosound: 13-bit signed -> shift left 5 to use most of 18-bit range
+// Turbosound: 13-bit signed -> <<5 to 18-bit
 wire signed [17:0] ts_scaled_l = {ts_l, 5'b0};
 wire signed [17:0] ts_scaled_r = {ts_r, 5'b0};
 
-// General Sound: 15-bit signed -> sign-extend to 18-bit
+// General Sound: 15-bit signed -> sign-extend to 18-bit (<<3 effective)
 wire signed [17:0] gs_scaled_l = {{3{gs_l[14]}}, gs_l};
 wire signed [17:0] gs_scaled_r = {{3{gs_r[14]}}, gs_r};
 
-// SAA1099: 8-bit unsigned -> shift left 8, treat as unsigned for now
-wire signed [17:0] saa_scaled_l = {2'b0, saa_l, 8'b0};
-wire signed [17:0] saa_scaled_r = {2'b0, saa_r, 8'b0};
+// SAA1099: 8-bit unsigned -> <<7 (was <<8, -6dB to match master)
+wire signed [17:0] saa_scaled_l = {3'b0, saa_l, 7'b0};
+wire signed [17:0] saa_scaled_r = {3'b0, saa_r, 7'b0};
 
-// Beeper: 3-bit unsigned -> shift left 12
-wire signed [17:0] beeper_scaled = {3'b0, beeper, 12'b0};
+// Beeper: 7-bit boxcar sum -> <<7 (was 3-bit <<12, now 7-bit <<7 = same range)
+// boxcar gives 16x, so <<7 instead of <<11 to match master's <<10 for raw 3-bit
+wire signed [17:0] beeper_scaled = {4'b0, beeper, 7'b0};
 
 // ============================================================================
 // STAGE 2: DC Blocker (leaky integrator)
 // ============================================================================
-// One-pole highpass: y = x - avg; avg += (x - avg) >> K
-// At clk_aud 56MHz: K=22 -> fc = 56e6/(2*pi*2^22) ~ 2.1 Hz
-// This automatically centers any unipolar source regardless of activity level
-//
-// Each accumulator is 40-bit: [39:22] is the DC estimate, lower bits are fraction
+// One-pole highpass at ~2.1 Hz (K=22 at 56MHz)
+// Automatically centers unipolar sources regardless of activity
 
-// Turbosound DC blocker (PSG is unipolar 0..1530, FM is bipolar)
 reg signed [39:0] ts_dc_acc_l, ts_dc_acc_r;
 wire signed [17:0] ts_dc_l = ts_dc_acc_l[39:22];
 wire signed [17:0] ts_dc_r = ts_dc_acc_r[39:22];
 wire signed [17:0] ts_centered_l = ts_scaled_l - ts_dc_l;
 wire signed [17:0] ts_centered_r = ts_scaled_r - ts_dc_r;
 
-// SAA1099 DC blocker (unipolar 0..255)
 reg signed [39:0] saa_dc_acc_l, saa_dc_acc_r;
 wire signed [17:0] saa_dc_l = saa_dc_acc_l[39:22];
 wire signed [17:0] saa_dc_r = saa_dc_acc_r[39:22];
 wire signed [17:0] saa_centered_l = saa_scaled_l - saa_dc_l;
 wire signed [17:0] saa_centered_r = saa_scaled_r - saa_dc_r;
 
-// Beeper DC blocker (unipolar 0..7)
 reg signed [39:0] beeper_dc_acc;
 wire signed [17:0] beeper_dc = beeper_dc_acc[39:22];
 wire signed [17:0] beeper_centered = beeper_scaled - beeper_dc;
 
-// General Sound is already centered (signed), no DC blocker needed
+// GS is already centered (signed)
 
-// DC blocker update (leaky integrator with K=22)
 always @(posedge clk) begin
     if (reset) begin
         ts_dc_acc_l <= 0;
@@ -95,8 +98,6 @@ always @(posedge clk) begin
         beeper_dc_acc <= 0;
     end
     else begin
-        // Update DC estimates: acc += (x - dc) = acc + x_centered
-        // Sign-extend 18-bit centered value to 40-bit before adding
         ts_dc_acc_l <= ts_dc_acc_l + {{22{ts_centered_l[17]}}, ts_centered_l};
         ts_dc_acc_r <= ts_dc_acc_r + {{22{ts_centered_r[17]}}, ts_centered_r};
         saa_dc_acc_l <= saa_dc_acc_l + {{22{saa_centered_l[17]}}, saa_centered_l};
@@ -106,40 +107,126 @@ always @(posedge clk) begin
 end
 
 // ============================================================================
-// STAGE 3: Wide accumulator mixing
+// STAGE 3: Activity Detection
 // ============================================================================
+// Peak follower with slow decay (~0.5s at 48kHz)
+// Detects actual signal activity, not just "enabled in OSD"
 
-// Sum all DC-blocked sources (19 bits to handle overflow)
-wire signed [18:0] sum_l = ts_centered_l + gs_scaled_l + saa_centered_l + beeper_centered;
-wire signed [18:0] sum_r = ts_centered_r + gs_scaled_r + saa_centered_r + beeper_centered;
+localparam [17:0] ACT_THRESH = 18'd512;  // ~-40dB relative to full scale
+
+// Magnitude of centered signals (for activity detection)
+wire [17:0] ts_mag_l = ts_centered_l[17] ? -ts_centered_l : ts_centered_l;
+wire [17:0] ts_mag_r = ts_centered_r[17] ? -ts_centered_r : ts_centered_r;
+wire [17:0] ts_mag = (ts_mag_l > ts_mag_r) ? ts_mag_l : ts_mag_r;
+
+wire [17:0] gs_mag_l = gs_scaled_l[17] ? -gs_scaled_l : gs_scaled_l;
+wire [17:0] gs_mag_r = gs_scaled_r[17] ? -gs_scaled_r : gs_scaled_r;
+wire [17:0] gs_mag = (gs_mag_l > gs_mag_r) ? gs_mag_l : gs_mag_r;
+
+wire [17:0] saa_mag_l = saa_centered_l[17] ? -saa_centered_l : saa_centered_l;
+wire [17:0] saa_mag_r = saa_centered_r[17] ? -saa_centered_r : saa_centered_r;
+wire [17:0] saa_mag = (saa_mag_l > saa_mag_r) ? saa_mag_l : saa_mag_r;
+
+wire [17:0] beeper_mag = beeper_centered[17] ? -beeper_centered : beeper_centered;
+
+// Activity envelopes (peak followers)
+reg [17:0] ts_env, gs_env, saa_env, beeper_env;
+
+always @(posedge clk) begin
+    if (reset) begin
+        ts_env <= 0;
+        gs_env <= 0;
+        saa_env <= 0;
+        beeper_env <= 0;
+    end
+    else if (ce) begin
+        // Attack instant, release ~0.5s (env - env>>15 at 48kHz)
+        ts_env <= (ts_mag > ts_env) ? ts_mag : (ts_env - (ts_env >> 15));
+        gs_env <= (gs_mag > gs_env) ? gs_mag : (gs_env - (gs_env >> 15));
+        saa_env <= (saa_mag > saa_env) ? saa_mag : (saa_env - (saa_env >> 15));
+        beeper_env <= (beeper_mag > beeper_env) ? beeper_mag : (beeper_env - (beeper_env >> 15));
+    end
+end
+
+// Activity flags
+wire ts_active = (ts_env > ACT_THRESH);
+wire gs_active = (gs_env > ACT_THRESH);
+wire saa_active = (saa_env > ACT_THRESH);
+wire beeper_active = (beeper_env > ACT_THRESH);
 
 // ============================================================================
-// STAGE 4: Normalize to 16-bit range
+// STAGE 4: Gain Staging
 // ============================================================================
-// Shift right by 2 to bring 18-bit range to 16-bit nominal
-
-wire signed [17:0] norm_l = sum_l[18:1];
-wire signed [17:0] norm_r = sum_r[18:1];
-
-// ============================================================================
-// STAGE 5: Soft Limiter (piecewise linear)
-// ============================================================================
-// Transparent compression that catches peaks without pumping
+// Target gain based on active source count
+// Goal: nominal sum of active sources fits in ~0.9 FS
 //
-// Knee points (in 16-bit positive range):
-//   0 - 22937 (0.70): unity gain
-//   22938 - 27852 (0.70-0.85): 2:1 ratio
-//   27853 - 31129 (0.85-0.95): 4:1 ratio
-//   31130+ (0.95+): 8:1 ratio capped at 32113 (0.98)
+// Worst-case amplitudes (18-bit scaled, centered):
+//   TS alone:     ~49000 (2x AY full)
+//   TS+GS:        ~65000
+//   TS+GS+SAA:    ~81000
+//   All four:     ~97000
+//
+// Target gains (16.16 fixed point, 1.0 = 65536):
+//   1 source:  1.0    = 65536  (>>0)
+//   2 sources: 0.625  = 40960  (>>1 + >>3)
+//   3 sources: 0.5    = 32768  (>>1)
+//   4 sources: 0.375  = 24576  (>>2 + >>3)
 
-localparam signed [17:0] KNEE1 = 18'sd22937;
-localparam signed [17:0] KNEE2 = 18'sd27852;
-localparam signed [17:0] KNEE3 = 18'sd31129;
-localparam signed [17:0] LIMIT = 18'sd32113;
+reg [16:0] gain_target;
+wire [1:0] active_count = ts_active + gs_active + saa_active + beeper_active;
 
-// Output of 2:1 zone at KNEE2: 22937 + (27852-22937)/2 = 25394
+always @(*) begin
+    case (active_count)
+        2'd0: gain_target = 17'd65536;  // Unity (nothing active = pass through)
+        2'd1: gain_target = 17'd65536;  // Unity
+        2'd2: gain_target = 17'd40960;  // 0.625
+        2'd3: gain_target = 17'd32768;  // 0.5
+        default: gain_target = 17'd24576;  // 0.375 (4 sources)
+    endcase
+end
+
+// Smoothed gain (one-pole, tau ~85ms at 48kHz)
+reg signed [16:0] gain_cur;
+wire signed [17:0] gain_delta = $signed({1'b0, gain_target}) - $signed({1'b0, gain_cur});
+
+always @(posedge clk) begin
+    if (reset) begin
+        gain_cur <= 17'd65536;  // Start at unity
+    end
+    else if (ce) begin
+        // gain_cur += (gain_target - gain_cur) >> 12
+        gain_cur <= gain_cur + (gain_delta >>> 12);
+    end
+end
+
+// ============================================================================
+// STAGE 5: Wide accumulator mixing with gain
+// ============================================================================
+
+// Raw sum (19 bits)
+wire signed [18:0] sum_raw_l = ts_centered_l + gs_scaled_l + saa_centered_l + beeper_centered;
+wire signed [18:0] sum_raw_r = ts_centered_r + gs_scaled_r + saa_centered_r + beeper_centered;
+
+// Apply gain (19 * 17 = 36 bits, take [35:16] for 20-bit result)
+wire signed [35:0] sum_gained_l = sum_raw_l * $signed({1'b0, gain_cur});
+wire signed [35:0] sum_gained_r = sum_raw_r * $signed({1'b0, gain_cur});
+
+// Normalize: >>1 to go from 18-bit nominal to 17-bit, then soft limit
+wire signed [17:0] norm_l = sum_gained_l[35:18];
+wire signed [17:0] norm_r = sum_gained_r[35:18];
+
+// ============================================================================
+// STAGE 6: Soft Limiter (emergency only)
+// ============================================================================
+// With proper gain staging, signals rarely hit the knees
+// Limiter catches transient peaks that slip through
+
+localparam signed [17:0] KNEE1 = 18'sd22937;  // 0.70
+localparam signed [17:0] KNEE2 = 18'sd27852;  // 0.85
+localparam signed [17:0] KNEE3 = 18'sd31129;  // 0.95
+localparam signed [17:0] LIMIT = 18'sd32113;  // 0.98
+
 localparam signed [17:0] OUT_K2 = 18'sd25394;
-// Output of 4:1 zone at KNEE3: 25394 + (31129-27852)/4 = 26213
 localparam signed [17:0] OUT_K3 = 18'sd26213;
 
 function signed [15:0] soft_limit;

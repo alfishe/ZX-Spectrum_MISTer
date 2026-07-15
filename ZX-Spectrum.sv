@@ -727,12 +727,34 @@ always @(posedge clk_aud) begin
 	end
 end
 
+// Beeper boxcar averaging: integrate 16 samples at ce_ym rate
+// First null at 218.75kHz eliminates T-state jitter
+// Sub-sample edge position encoded as fractional amplitude
+wire [2:0] beeper_raw = {ear_out, mic_out, tape_aud};
+reg [6:0] beeper_acc;
+reg [6:0] beeper_avg;
+always @(posedge clk_aud) begin
+	if (aud_reset) begin
+		beeper_acc <= 0;
+		beeper_avg <= 0;
+	end
+	else begin
+		if (ce_ym)
+			beeper_acc <= beeper_acc + {4'b0, beeper_raw};
+		if (ce_psg_gen) begin
+			beeper_avg <= beeper_acc;
+			beeper_acc <= ce_ym ? {4'b0, beeper_raw} : 7'd0;
+		end
+	end
+end
+
 // Audio mixer with soft limiter (handles all sources, no clipping)
 wire [15:0] mix_l, mix_r;
 audio_mix audio_mix
 (
 	.clk(clk_aud),
 	.reset(aud_reset),
+	.ce(ce_audio_char),  // 48kHz CE for gain smoothing
 
 	// Turbosound (13-bit signed, full 2xAY + FM range)
 	.ts_l(ts_l),
@@ -746,8 +768,8 @@ audio_mix audio_mix
 	.saa_l(saa_l),
 	.saa_r(saa_r),
 
-	// Beeper (combined)
-	.beeper({ear_out, mic_out, tape_aud}),
+	// Beeper (7-bit boxcar sum)
+	.beeper(beeper_avg),
 
 	// Output (16-bit signed, soft-limited)
 	.out_l(mix_l),
