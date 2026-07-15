@@ -17,6 +17,14 @@
 //   GS:     sign-extend (15-bit -> 18-bit, effectively <<3)
 //   SAA:    <<7 (8-bit -> 15-bit in 18-bit field)
 //   Beeper: <<7 (7-bit boxcar sum -> 14-bit in 18-bit field)
+//
+// Note: Even in "Clean" mode (no punch/room), this mixer differs from
+// master in two intentional ways:
+// - DC blocker removes unipolar offset (master carries DC to framework)
+// - Gain staging reduces level with multiple sources (master clips)
+// These are improvements, not bugs. For A/B testing vs master:
+// - Use single source only, or
+// - Apply >10Hz HPF to both signals before comparison
 //============================================================================
 
 module audio_mix
@@ -132,6 +140,13 @@ wire [17:0] beeper_mag = beeper_centered[17] ? -beeper_centered : beeper_centere
 // Activity envelopes (peak followers)
 reg [17:0] ts_env, gs_env, saa_env, beeper_env;
 
+// Guaranteed decrement: (env>>15)+1 ensures decay reaches zero
+// Without +1, env < 32768 gives decrement=0 and envelope freezes forever
+wire [17:0] ts_dec = (ts_env >> 15) + 18'd1;
+wire [17:0] gs_dec = (gs_env >> 15) + 18'd1;
+wire [17:0] saa_dec = (saa_env >> 15) + 18'd1;
+wire [17:0] beeper_dec = (beeper_env >> 15) + 18'd1;
+
 always @(posedge clk) begin
     if (reset) begin
         ts_env <= 0;
@@ -140,11 +155,11 @@ always @(posedge clk) begin
         beeper_env <= 0;
     end
     else if (ce) begin
-        // Attack instant, release ~0.5s (env - env>>15 at 48kHz)
-        ts_env <= (ts_mag > ts_env) ? ts_mag : (ts_env - (ts_env >> 15));
-        gs_env <= (gs_mag > gs_env) ? gs_mag : (gs_env - (gs_env >> 15));
-        saa_env <= (saa_mag > saa_env) ? saa_mag : (saa_env - (saa_env >> 15));
-        beeper_env <= (beeper_mag > beeper_env) ? beeper_mag : (beeper_env - (beeper_env >> 15));
+        // Attack instant, release ~0.5s with guaranteed decay to zero
+        ts_env <= (ts_mag > ts_env) ? ts_mag : ((ts_env > ts_dec) ? ts_env - ts_dec : 18'd0);
+        gs_env <= (gs_mag > gs_env) ? gs_mag : ((gs_env > gs_dec) ? gs_env - gs_dec : 18'd0);
+        saa_env <= (saa_mag > saa_env) ? saa_mag : ((saa_env > saa_dec) ? saa_env - saa_dec : 18'd0);
+        beeper_env <= (beeper_mag > beeper_env) ? beeper_mag : ((beeper_env > beeper_dec) ? beeper_env - beeper_dec : 18'd0);
     end
 end
 
@@ -173,20 +188,22 @@ wire beeper_active = (beeper_env > ACT_THRESH);
 //   4 sources: 0.375  = 24576  (>>2 + >>3)
 
 reg [16:0] gain_target;
-wire [1:0] active_count = ts_active + gs_active + saa_active + beeper_active;
+wire [2:0] active_count = {2'b0, ts_active} + {2'b0, gs_active} +
+                          {2'b0, saa_active} + {2'b0, beeper_active};
 
 always @(*) begin
     case (active_count)
-        2'd0: gain_target = 17'd65536;  // Unity (nothing active = pass through)
-        2'd1: gain_target = 17'd65536;  // Unity
-        2'd2: gain_target = 17'd40960;  // 0.625
-        2'd3: gain_target = 17'd32768;  // 0.5
+        3'd0: gain_target = 17'd65536;  // Unity (nothing active = pass through)
+        3'd1: gain_target = 17'd65536;  // Unity
+        3'd2: gain_target = 17'd40960;  // 0.625
+        3'd3: gain_target = 17'd32768;  // 0.5
         default: gain_target = 17'd24576;  // 0.375 (4 sources)
     endcase
 end
 
 // Smoothed gain (one-pole, tau ~85ms at 48kHz)
-reg signed [16:0] gain_cur;
+// gain_cur is unsigned 17-bit (0..65536 = 0.0..1.0 in 16.16 fixed point)
+reg [16:0] gain_cur;
 wire signed [17:0] gain_delta = $signed({1'b0, gain_target}) - $signed({1'b0, gain_cur});
 
 always @(posedge clk) begin
@@ -194,8 +211,9 @@ always @(posedge clk) begin
         gain_cur <= 17'd65536;  // Start at unity
     end
     else if (ce) begin
-        // gain_cur += (gain_target - gain_cur) >> 12
-        gain_cur <= gain_cur + (gain_delta >>> 12);
+        // Rounding: +2048 ensures upward slew reaches target exactly
+        // Without it, positive delta < 4096 gives shift result 0
+        gain_cur <= gain_cur + ((gain_delta + 18'sd2048) >>> 12);
     end
 end
 
@@ -207,13 +225,15 @@ end
 wire signed [18:0] sum_raw_l = ts_centered_l + gs_scaled_l + saa_centered_l + beeper_centered;
 wire signed [18:0] sum_raw_r = ts_centered_r + gs_scaled_r + saa_centered_r + beeper_centered;
 
-// Apply gain (19 * 17 = 36 bits, take [35:16] for 20-bit result)
+// Apply gain (19 * 17 = 36 bits)
+// gain_cur is 16.16 fixed point, so divide by 2^16 to get result
+// Take [34:17] for 18-bit result (sum * gain / 2^16 / 2 = sum * gain / 2^17)
+// This matches master's /2 normalization at unity gain
 wire signed [35:0] sum_gained_l = sum_raw_l * $signed({1'b0, gain_cur});
 wire signed [35:0] sum_gained_r = sum_raw_r * $signed({1'b0, gain_cur});
 
-// Normalize: >>1 to go from 18-bit nominal to 17-bit, then soft limit
-wire signed [17:0] norm_l = sum_gained_l[35:18];
-wire signed [17:0] norm_r = sum_gained_r[35:18];
+wire signed [17:0] norm_l = sum_gained_l[34:17];
+wire signed [17:0] norm_r = sum_gained_r[34:17];
 
 // ============================================================================
 // STAGE 6: Soft Limiter (emergency only)
