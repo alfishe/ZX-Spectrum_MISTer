@@ -52,6 +52,13 @@ module YM2149
 	output [7:0] CHANNEL_B, // PSG Output channel B
 	output [7:0] CHANNEL_C, // PSG Output channel C
 
+	// Raw 5-bit pre-DAC channel levels for external HQ pipeline.
+	// Fixed volumes map as 2*vol+1 (unreal-ng convention), envelope passes
+	// env_vol directly, gated channels output 0.
+	output [4:0] LEVEL_A,
+	output [4:0] LEVEL_B,
+	output [4:0] LEVEL_C,
+
 	input        SEL,
 	input        MODE,
 	
@@ -154,7 +161,11 @@ always @(posedge CLK) begin
 		if (ena_div_noise) begin
 			if (!ymreg[6][4:0] || (noise_gen_cnt >= ymreg[6][4:0] - 1'd1)) begin
 				noise_gen_cnt <= 0;
-				poly17 <= {(poly17[0] ^ poly17[2] ^ !poly17), poly17[16:1]};
+				// 17-bit LFSR, feedback bit0 XOR bit3 (die-verified AY-3-8910,
+				// x^17+x^3+1, maximal 131071-state sequence). The previous
+				// bit0^bit2 polynomial is non-primitive (cycles of 114681/
+				// 16383/7 states). !poly17 escapes the all-zero lockup state.
+				poly17 <= {(poly17[0] ^ poly17[3] ^ !poly17), poly17[16:1]};
 			end else begin
 				noise_gen_cnt <= noise_gen_cnt + 1'd1;
 			end
@@ -192,17 +203,25 @@ always @(posedge CLK) begin
 end
 
 reg env_ena;
-wire [15:0] env_gen_comp = {ymreg[12], ymreg[11]} ? {ymreg[12], ymreg[11]} - 1'd1 : 16'd0;
+// Envelope prescaler phase matches unreal-ng EnvelopeGenerator:
+// step every `period` ticks, first step `period+1` ticks after the shape
+// write (counter compares BEFORE increment, counts 1..period after a step).
+// The previous comp=period-1 form stepped one tick early relative to the
+// tone generators, misaligning envelope-gated bass by one 218.75 kHz tick.
+wire [15:0] env_gen_comp = {ymreg[12], ymreg[11]} ? {ymreg[12], ymreg[11]} : 16'd1;
 
 //p_envelope_freq
 always @(posedge CLK) begin
 	reg [15:0] env_gen_cnt;
 
-	if(CE) begin
+	if(env_reset | RESET) begin
+		env_gen_cnt <= 0;   // shape write restarts the prescaler (as software)
+	end
+	else if(CE) begin
 		env_ena <= 0;
 		if(ena_div) begin
 			if (env_gen_cnt >= env_gen_comp) begin
-				env_gen_cnt <= 0;
+				env_gen_cnt <= 16'd1;
 				env_ena <= 1;
 			end else begin
 				env_gen_cnt <= (env_gen_cnt + 1'd1);
@@ -295,11 +314,21 @@ always @(posedge CLK) begin
 end
 
 reg [5:0] A,B,C;
+reg [4:0] lvl_a, lvl_b, lvl_c;
 always @(posedge CLK) begin
 	A <= {MODE, ~((ymreg[7][0] | tone_gen_op[1]) & (ymreg[7][3] | noise_gen_op[0])) ? 5'd0 : ymreg[8][4]  ? env_vol[4:0] : { ymreg[8][3:0],  ymreg[8][3]}};
 	B <= {MODE, ~((ymreg[7][1] | tone_gen_op[2]) & (ymreg[7][4] | noise_gen_op[1])) ? 5'd0 : ymreg[9][4]  ? env_vol[4:0] : { ymreg[9][3:0],  ymreg[9][3]}};
 	C <= {MODE, ~((ymreg[7][2] | tone_gen_op[3]) & (ymreg[7][5] | noise_gen_op[2])) ? 5'd0 : ymreg[10][4] ? env_vol[4:0] : {ymreg[10][3:0], ymreg[10][3]}};
+
+	// HQ tap: same gating, but fixed volumes use the unreal-ng 2*vol+1 mapping
+	lvl_a <= ~((ymreg[7][0] | tone_gen_op[1]) & (ymreg[7][3] | noise_gen_op[0])) ? 5'd0 : ymreg[8][4]  ? env_vol[4:0] : { ymreg[8][3:0], 1'b1};
+	lvl_b <= ~((ymreg[7][1] | tone_gen_op[2]) & (ymreg[7][4] | noise_gen_op[1])) ? 5'd0 : ymreg[9][4]  ? env_vol[4:0] : { ymreg[9][3:0], 1'b1};
+	lvl_c <= ~((ymreg[7][2] | tone_gen_op[3]) & (ymreg[7][5] | noise_gen_op[2])) ? 5'd0 : ymreg[10][4] ? env_vol[4:0] : {ymreg[10][3:0], 1'b1};
 end
+
+assign LEVEL_A = lvl_a;
+assign LEVEL_B = lvl_b;
+assign LEVEL_C = lvl_c;
 
 wire [7:0] volTable[64] = '{
 	//YM2149
