@@ -41,9 +41,13 @@ module jt03(
     output          [ 7:0] psg_A,
     output          [ 7:0] psg_B,
     output          [ 7:0] psg_C,
+    // Raw 5-bit pre-DAC PSG levels (unreal-ng mapping) for HQ pipeline
+    output          [ 4:0] psg_lvl_A,
+    output          [ 4:0] psg_lvl_B,
+    output          [ 4:0] psg_lvl_C,
     output  signed  [15:0] fm_snd,
     // combined output
-    output          [ 9:0] psg_snd,    
+    output          [ 9:0] psg_snd,
     output  signed  [15:0] snd,
     output          snd_sample
 );
@@ -66,7 +70,10 @@ u_jt12(
     .psg_A          ( psg_A        ),
     .psg_B          ( psg_B        ),
     .psg_C          ( psg_C        ),
-    .psg_snd        ( psg_snd      ),    
+    .psg_lvl_A      ( psg_lvl_A    ),
+    .psg_lvl_B      ( psg_lvl_B    ),
+    .psg_lvl_C      ( psg_lvl_C    ),
+    .psg_snd        ( psg_snd      ),
     .fm_snd_left    ( fm_snd       ),
     .fm_snd_right   (),
 

@@ -41,6 +41,10 @@ module jt12_top (
     output          [ 7:0] psg_A,
     output          [ 7:0] psg_B,
     output          [ 7:0] psg_C,
+    // Raw 5-bit pre-DAC PSG levels (unreal-ng mapping) for HQ pipeline
+    output          [ 4:0] psg_lvl_A,
+    output          [ 4:0] psg_lvl_B,
+    output          [ 4:0] psg_lvl_C,
     output  signed  [15:0] fm_snd_left,
     output  signed  [15:0] fm_snd_right,
     // combined output
@@ -256,11 +260,14 @@ generate
            .DO(psg_dout),
            .CHANNEL_A(psg_A),
            .CHANNEL_B(psg_B),
-           .CHANNEL_C(psg_C)
+           .CHANNEL_C(psg_C),
+           .LEVEL_A(psg_lvl_A),
+           .LEVEL_B(psg_lvl_B),
+           .LEVEL_C(psg_lvl_C)
         );
         assign psg_snd = {2'b00, psg_A} + {2'b00, psg_B} + {2'b00, psg_C};
-        assign snd_left  = fm_snd_left  + { 2'b0, psg_snd[9:1],5'd0}; 
-        assign snd_right = fm_snd_right + { 2'b0, psg_snd[9:1],5'd0}; 
+        assign snd_left  = fm_snd_left  + { 2'b0, psg_snd[9:1],5'd0};
+        assign snd_right = fm_snd_right + { 2'b0, psg_snd[9:1],5'd0};
         assign dout = addr[0] ? psg_dout : fm_dout;
     end else begin
         assign psg_snd  = 10'd0;
@@ -268,6 +275,9 @@ generate
         assign snd_right= fm_snd_right;
         assign psg_dout = 8'd0;
         assign dout = fm_dout;
+        assign psg_lvl_A = 5'd0;
+        assign psg_lvl_B = 5'd0;
+        assign psg_lvl_C = 5'd0;
     end
 endgenerate
 
