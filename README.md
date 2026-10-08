@@ -4,12 +4,14 @@ Some verilog models from Till Harbaum [Spectrum](https://github.com/mist-devel/m
 
 ### Features:
 - Fully functional [ZX Spectrum 48K, 128K, +3](https://en.wikipedia.org/wiki/ZX_Spectrum) and [Pentagon 128](https://en.wikipedia.org/wiki/Pentagon_(computer)) with correct CPU and Video timings.
+- Scorpion ZS-256 (base model, Shadow Service Monitor via F11). Set Video Timings to Scorpion as well.
 - Pentagon 1024K and Profi 1024K memory interfaces.
 - Turbo 7MHz, 14MHz, 28MHz, 56MHz.
 - [ULA+ v1.1](https://sinclair.wiki.zxnet.co.uk/wiki/ULAplus) programmable palettes with extended Timex control.
 - Timex HiColor, HiRes modes.
 - TAP tape format with turbo (direct byte injection) and normal loading.
 - TZX and CSW tape formats with fast(16x) and normal loading.
+- PZX tape format with fast(16x) and normal loading.
 - Z80/SNA snapshot loading.
 - [TR-DOS](https://sinclair.wiki.zxnet.co.uk/wiki/TR-DOS_filesystem) (Beta Disk Interface) - TRD(read/write) and SCL(read-only) images.
 - [G+DOS](https://en.wikipedia.org/wiki/%2BD) (MGT +D Disk Interface) and IMG, MGT images (only in non +2A/+3 memory modes).
@@ -41,6 +43,9 @@ then issue **RANDOMIZE USR 15616**. Use command **RETURN** to leave TR-DOS.
 The original +3 disk drive is a single-sided single-destiny drive, but this core supports double-sided double-destiny images, too.
 An empty [DSDD image](https://github.com/MiSTer-devel/ZX-Spectrum_MISTer/tree/master/releases/dsdd720k.dsk.gz) is great for saving from Multiface.
 ***Note:*** in +3 mode, both the Beta and the +3 disk drive are supported, but only one image can be mounted, so both cannot be used at the same time.
+
+**PZX** is the [Perfect ZX Tape](https://github.com/raxoft/pzxtools) format. It stores the tape as pulses, like TZX and CSW, thus it is played through the internal AUDIO IN loop and turbo (direct byte injection) loading is not available for it.
+Keys **F1** (pause/continue), **F2** (previous part) and **F3** (next part) work like with TAP: a part starts at every PULS block, at every DATA block which is not preceded by a PULS block and at every BRWS browse point. A STOP block pauses the playback.
 
 **TAP** is simple tape dump format. It is possible to use normal and **turbo** loading (only if application uses standard loading routines from ROM). To load in turbo mode, you need to choose TAP file in OSD **first** and then start to load app through menu (128K) or by command **LOAD ""** (48K, 128K). To load TAP file in normal mode through internal AUDIO IN loop, you need to start loading through menu or command **first** and then choose TAP file though OSD. If application uses non-standard loader, then TAP file will be played in normal mode automatically. Thus it's safe to always choose the turbo mode. Some applications are split into several parts inside one TAP file. For example DEMO apps where each part is loaded after finish of previous part, or games loading levels by requests. The core pauses the TAP playback after each code part (flag=#255). If application uses standard loader from ROM, then everything will be handled automatically and unnoticeable. If app uses non-standard loader, then there is no way to detect the loading. In this case you need to press **F1 key** to continue/pause TAP playback. Do not press F1 key while data is loading (or you will have to reset and start from beginning). To help operate with TAP (for non-standard loaders) there is special yellow LED signaling:
 - LED is ON: more data is available in TAP file.
@@ -76,9 +81,9 @@ Due to SDRAM speed limitation 28MHz and 56MHz speeds include wait states, so eff
 - **Profi 1024K** uses bits 0-2 in port DFFD to access additional memory.
 
 ### Mouse and Joystick:
-Kempston mouse has no strict convention which bit (D0 or D1) reflects a main button. After each reset, the first button pressed on mouse (left or right buttons only) will be represented by bit D0 (other button will be represented by bit D1). So, if you are not satisfied by mouse button map, then simply press reset and then press other button first.
-Due to port conflict with Kempston joystick, core uses autodetection. Any mouse activity will switch port to mouse control. Any joystick activity will switch port to joystick control.
-Some games/apps autodetect the mouse. So, move the mouse or click its button before use such games/apps.
+Kempston mouse has no strict convention which bit (D0 or D1) reflects a main button. Pick the mapping with the OSD Mouse option.
+The mouse and the Kempston joystick decoded separately (#xxDF for the mouse, #xx1F for the joystick) and both can be used at the same time.
+Scroll wheel is supported. Bits D4-D7 of #FADF hold a 4-bit wheel counter. OSD Mouse Wheel option can invert the direction.
 
 ### Snapshots:
 Core supports snapshot functionality of +D. In order to use it, you need to mount IMG or MGT image. ROM includes preloaded G+DOS image, thus you can mount IMG/MGT at any time (even while playing the game). **Note #1**: preloaded G+DOS has been patched to allow disk change on-the-fly. So, if you will load G+DOS from disk, then be careful - it may corrupt previous saves if you will change the disk! **Note #2:** only one disk image can be mounted at any time. Thus make sure if you use game from TRD image, the game won't save anything later to its disk. 
@@ -111,6 +116,7 @@ Make sure boot1.rom and files inside VHD (or SD card) are from the same ESXDOS v
 - F10 - switch to Basic 48 (without 48K lock) and issue **LOAD""**
 - RShift+F10 - same as F10 with 48K lock
 - F11 - enter +D snapshot menu (or ROM0 menu if IMG/MGT not mounted) or DivMMC file browser.
+- F11 - in Scorpion ZS-256 mode: enter the Shadow Service Monitor (exit with the monitor's own exit routine).
 - RShift+F11 - enter Multiface 128 menu
 - F12 - OSD menu
 
@@ -147,3 +153,9 @@ boot.rom is a collection of required ROMs, however it does not contain a full se
 | 13 | 28000 | 2000 | 5d74d2e2e5a537639da92ff120f8a6d86f474495 | mf3-3.C.rom (CRC32: 2d594640) Multiface 3 (3.C) |
 | 14 | 2A000 | 2000 | N/A | zeroes.bin unused 8K, padding for the MF3 ROM to fill remaining space in 16K block |
 | 15 | 2C000 | 4000 | 5ea7c2b824672e914525d1d5c419d71b84a426a2 | 48.rom BASIC for 16/48K models |
+| 16 | 30000 | 4000 | 477114ff0fe1388e0979df1423602b21248164e5 | Scorpion ZS-256 v2.94 ROM 0 (Scorpion BASIC 128) |
+| 17 | 34000 | 4000 | 367b5a102fb663beee8e7930b8c4acc219c1f7b3 | Scorpion ZS-256 v2.94 ROM 1 (48K BASIC) |
+| 18 | 38000 | 4000 | 5ecf853611870802b07527cdb78cae553adc761d | Scorpion ZS-256 v2.94 ROM 2 (Shadow Service Monitor) |
+| 19 | 3C000 | 4000 | a95e48399622e5b7cfda6aa724c5b1c62d892c97 | Scorpion ZS-256 v2.94 ROM 3 (TR-DOS 5.03) |
+
+With the Scorpion ROMs added boot.rom is 256 KB (was 192 KB). SHA256: `a64828d45e2e73501916e1bee7beb30f028aa4ea181a9a60720bdeef28ec2b40`. To rebuild it from a 192 KB release ROM: `python3 tools/build_boot_rom.py --base <boot.rom> -o boot.rom` (Scorpion ROMs: `tools/scorp294.rom`).
