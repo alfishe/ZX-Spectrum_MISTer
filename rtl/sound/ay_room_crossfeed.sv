@@ -37,10 +37,12 @@ module ay_room_crossfeed
 localparam DELAY_SAMPLES = 437;
 localparam DELAY_BITS = 9;  // log2(512) > 437
 
-// Delay line buffers (inferred as block RAM)
-// Use initial block instead of reset loop for RAM initialization
-(* ram_style = "block" *) reg signed [31:0] delay_l [0:511];
-(* ram_style = "block" *) reg signed [31:0] delay_r [0:511];
+// Delay line buffers (block RAM, see the RAM process below)
+// Use initial block instead of reset loop for RAM initialization.
+// Write and read addresses always differ by DELAY_SAMPLES, so no
+// read-during-write bypass logic is needed.
+(* ramstyle = "no_rw_check" *) reg signed [31:0] delay_l [0:511];
+(* ramstyle = "no_rw_check" *) reg signed [31:0] delay_r [0:511];
 
 // Initialize RAM to zero (synthesis will create MIF)
 integer i;
@@ -96,6 +98,24 @@ wire [DELAY_BITS-1:0] read_idx = (delay_idx >= DELAY_SAMPLES) ?
                                   (delay_idx - DELAY_SAMPLES) :
                                   (delay_idx + 9'd512 - DELAY_SAMPLES);
 
+// RAM process: kept out of the reset/FSM block and read synchronously
+// every clock, so Quartus maps the delay lines to M10K. Inside the FSM
+// they were not inferred ("asynchronous read logic") and cost ~33k
+// registers. read_idx changes only with delay_idx (in S_READ), so the
+// registered read already holds delay[read_idx] when S_READ samples it:
+// same value and timing as reading the array directly in S_READ.
+reg signed [31:0] delay_q_l, delay_q_r;
+wire delay_we = ~reset & ce & (state == S_IDLE);
+
+always @(posedge clk) begin
+    if (delay_we) begin
+        delay_l[delay_idx] <= in_left;
+        delay_r[delay_idx] <= in_right;
+    end
+    delay_q_l <= delay_l[read_idx];
+    delay_q_r <= delay_r[read_idx];
+end
+
 always @(posedge clk) begin
     if (reset) begin
         delay_idx <= 0;
@@ -123,9 +143,8 @@ always @(posedge clk) begin
                     // Read coefficient using function
                     room_coef <= get_room_coef(room_level);
 
-                    // Store new samples in delay line
-                    delay_l[delay_idx] <= in_left;
-                    delay_r[delay_idx] <= in_right;
+                    // New samples are stored in the delay line by the
+                    // RAM process (delay_we) on this edge.
 
                     // Read delayed samples (R->L, L->R for crossfeed)
                     // Block RAM has 1 cycle latency
@@ -135,8 +154,8 @@ always @(posedge clk) begin
 
             S_READ: begin
                 // Read from block RAM (crossfeed: R->L, L->R)
-                delayed_l <= delay_r[read_idx];
-                delayed_r <= delay_l[read_idx];
+                delayed_l <= delay_q_r;
+                delayed_r <= delay_q_l;
 
                 // Advance index after read
                 delay_idx <= (delay_idx + 1) & 9'h1FF;
