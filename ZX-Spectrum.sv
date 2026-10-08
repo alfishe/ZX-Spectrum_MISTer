@@ -91,7 +91,7 @@ localparam CONF_STR = {
 	"P3O[43],HQ Punch,On,Off;",
 	"P3O[48],HQ FIR,On,Off;",
 	"P3O[50],HQ DC Filter,On,Off;",
-	"P3O[47:44],HQ Room,6dB,Off,15dB,14dB,13dB,12dB,9dB,3dB,2dB,1dB;",
+	"P3O[47:44],HQ Room,9dB,Off,15dB,14dB,13dB,12dB,6dB,3dB,2dB,1dB;",
 	"P3O[53:51],HQ Voicing,Classic,Flat,Headphones,Warm,TV,Small Speaker;",
 
 	"P2,Hardware & Input;",
@@ -666,18 +666,18 @@ turbosound_hq turbosound
 
 	// HQ configuration
 	// Option label order puts the default (status=0) first: HQ Audio and
-	// Punch default On (inverted bits), Room defaults to 6dB (menu index 0
-	// remapped to module level 6; menu 1=Off, 2..6 = 15..9dB, 7..9 = 3..1dB).
-	// Voicing defaults to Classic, the unreal-ng default: menu 0 = Classic
-	// (profile 1), 1 = Flat (profile 0), 2..5 as is.
+	// Punch default On (inverted bits). Room defaults to -9 dB and voicing to
+	// Classic, the unreal-ng defaults. Room menu: 0 = 9dB (module level 5),
+	// 1 = Off, 2..5 = 15..12dB (levels 1..4), 6 = 6dB, 7..9 = 3..1dB.
+	// Voicing menu: 0 = Classic (profile 1), 1 = Flat (profile 0), 2..5 as is.
 	.HQ_ENABLE(~status[42]),
 	.STEREO_MODE({1'b0, status[40]}),  // ABC/ACB from existing setting
 	.PUNCH_ENABLE(~status[43]),
 	.FIR_BYPASS(status[48]),
 	.DC_BYPASS(status[50]),
-	.ROOM_LEVEL((status[47:44] == 4'd0) ? 4'd6 :
+	.ROOM_LEVEL((status[47:44] == 4'd0) ? 4'd5 :
 	            (status[47:44] == 4'd1) ? 4'd0 :
-	            (status[47:44] <= 4'd6) ? status[47:44] - 4'd1 :
+	            (status[47:44] <= 4'd5) ? status[47:44] - 4'd1 :
 	                                      status[47:44]),
 	.VOICING((status[53:51] == 3'd0) ? 3'd1 :
 	         (status[53:51] == 3'd1) ? 3'd0 :
