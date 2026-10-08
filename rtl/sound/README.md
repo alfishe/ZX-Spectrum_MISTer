@@ -30,7 +30,8 @@ turbosound_hq output         Q4.28 -> int16 (>>> 14), first-order-hold
                              interpolation to the 3.5 MHz CE rate
 ```
 
-`turbosound_hq.sv` wires the chain and the TurboSound / TurboSound FM chip
+`turbosound_hq.sv` wires the chain, the legacy output (optionally band-limited
+by the FIR when HQ is off) and the TurboSound / TurboSound FM chip
 select; `ZX-Spectrum.sv` sums the HQ output with the other sources
 (sat16, x2 makeup gain) when HQ Audio is on.
 
@@ -52,14 +53,26 @@ punch differ by -57 dB.
 
 ## Options (OSD Audio page)
 
-| Option | status bits | Default |
-|---|---|---|
-| HQ Audio | 42 | On |
-| HQ Punch | 43 | On |
-| HQ Room | 47:44 | -9 dB |
-| HQ FIR | 48 | On (Off = debug bypass) |
-| HQ DC Filter | 50 | On (Off = debug bypass, subtracts 0.25) |
-| HQ Voicing | 53:51 | Classic |
+| Option | status bits | Default | Available |
+|---|---|---|---|
+| HQ Audio | 42 | On | always |
+| PSG Anti-alias | 54 | On | HQ Audio Off only |
+| HQ Punch | 43 | On | HQ Audio On only |
+| HQ Room | 47:44 | -9 dB | HQ Audio On only |
+| HQ FIR | 48 | On (Off = debug bypass) | HQ Audio On only |
+| HQ DC Filter | 50 | On (Off = debug bypass, subtracts 0.25) | HQ Audio On only |
+| HQ Voicing | 53:51 | Classic | HQ Audio On only |
+
+Availability uses `status_menumask` bit 4 (= HQ Audio Off): the HQ options
+carry `D4` (disabled while HQ is off), PSG Anti-alias carries `d4`.
+
+With HQ Audio Off the core outputs the legacy PSG mix through the upstream
+top-level compressor. PSG Anti-alias On band-limits that legacy output with
+the (otherwise idle) HQ FIR before it leaves `turbosound_hq`: the raw square
+edges otherwise alias at the framework's 48 kHz sampling, 28-39 dB below the
+note from 440 Hz up; filtered, 57-68 dB, with the legacy tonal balance kept
+(within 0.03 dB). PSG Anti-alias Off gives the upstream output sample for
+sample.
 
 The chip model (AY8910 / YM2149 DAC curve) and the ABC / ACB stereo follow the
 core's existing PSG Model and PSG Stereo options.
