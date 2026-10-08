@@ -68,7 +68,7 @@ localparam CONF_STR = {
 	"S1,VHD,Load DivMMC;",
 	"-;",
 
-	"P1,Audio & Video;",
+	"P1,Video;",
 	"P1-;",
 	"P1O[5:4],Aspect Ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"P1O[16:15],Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%;",
@@ -77,15 +77,25 @@ localparam CONF_STR = {
 	"H2d1P1O[28],Vertical Crop,No,Yes;",
 	"h2d1P1O[29:28],Vertical Crop,No,270,216;",
 	"P1O[27:26],Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
-	"P1-;",
-	"P1O[21:20],General Sound,512KB,1MB,2MB,Disabled;",
-	"P1O[3:2],Stereo Mix,none,25%,50%,100%;",
-	"P1-;",
-	"P1O[39],PSG/FM,Enabled,Disabled;",
-	"P1O[40],PSG Stereo,ABC,ACB;",
-	"P1O[41],PSG Model,YM2149,AY8910;",
 
-	"P2,Hardware;",
+	"P3,Audio;",
+	"P3-;",
+	"P3O[21:20],General Sound,512KB,1MB,2MB,Disabled;",
+	"P3O[3:2],Stereo Mix,none,25%,50%,100%;",
+	"P3-;",
+	"P3O[39],PSG/FM,Enabled,Disabled;",
+	"P3O[40],PSG Stereo,ABC,ACB;",
+	"P3O[41],PSG Model,YM2149,AY8910;",
+	"P3-;",
+	"P3O[42],HQ Audio,On,Off;",
+	"d4P3O[54],PSG Anti-alias,On,Off;",
+	"D4P3O[43],HQ Punch,On,Off;",
+	"D4P3O[48],HQ FIR,On,Off;",
+	"D4P3O[50],HQ DC Filter,On,Off;",
+	"D4P3O[47:44],HQ Room,9dB,Off,15dB,14dB,13dB,12dB,6dB,3dB,2dB,1dB;",
+	"D4P3O[53:51],HQ Voicing,Classic,Flat,Headphones,Warm,TV,Small Speaker;",
+
+	"P2,Hardware & Input;",
 	"P2-;",
 	"P2O[7],Port #FE,Issue 2,Issue 3;",
 	"P2O[13],Port #FF,Timex,SAA1099;",
@@ -97,12 +107,13 @@ localparam CONF_STR = {
 	"P2-;",
 	"P2O[33:32],MMC Mode,Auto(VHD),SD Card 14MHz,SD Card 28MHz;",
 	"P2O[31:30],MMC Version,DivMMC+ESXDOS,DivMMC,ZXMMC;",
+	"P2-;",
+	"P2O[37:36],Keyboard,Normal,Ghosting,Recreated ZX,Recr+Ghosting;",
+	"P2O[19:17],Joystick,Kempston,Sinclair I,Sinclair II,Sinclair I+II,Cursor;",
+	"P2O[35:34],Mouse,Disabled,Kempston L/R,Kempston R/L;",
+	"P2O[49],Mouse Wheel,Normal,Inverted;",
 
 	"-;",
-	"O[37:36],Keyboard,Normal,Ghosting,Recreated ZX,Recr+Ghosting;",
-	"O[19:17],Joystick,Kempston,Sinclair I,Sinclair II,Sinclair I+II,Cursor;",
-	"O[35:34],Mouse,Disabled,Kempston L/R,Kempston R/L;",
-	"O[49],Mouse Wheel,Normal,Inverted;",
 	"O[6],Fast Tape Load,On,Off;",
 	"O[1],Tape Sound,On,Off;",
 	"O[24:22],CPU Speed,Original,7MHz,14MHz,28MHz,56MHz;",
@@ -282,7 +293,7 @@ hps_io #(.CONF_STR(CONF_STR), .VDNUM(2)) hps_io
 	.forced_scandoubler(forced_scandoubler),
 	.new_vmode(new_vmode),
 	.status(status),
-	.status_menumask({|status[9:8],en1080p,|vcrop,~need_apply}),
+	.status_menumask({status[42],|status[9:8],en1080p,|vcrop,~need_apply}),
 	.status_set(speed_set|arch_set|snap_hwset),
 	.status_in({status[63:25], speed_set ? speed_req : 3'b000, status[21:13], arch_set ? arch : snap_hwset ? snap_hw : status[12:8], status[7:0]}),
 
@@ -636,8 +647,10 @@ always @(posedge clk_aud) begin
 	ce_ym   <= !counter & ~p3;
 end
 
-// Turbosound FM: dual YM2203 chips
-turbosound turbosound
+wire        hq_valid;
+wire [15:0] hq_l, hq_r;
+
+turbosound_hq turbosound
 (
 	.RESET(aud_reset),
 	.CLK(clk_aud),
@@ -651,8 +664,27 @@ turbosound turbosound
 	.PSG_MIX(status[40]),
 	.PSG_TYPE(status[41]),
 
+	// menu index 0 is the default: room 0 = -9dB (level 5), voicing 0 = Classic (1)
+	.HQ_ENABLE(~status[42]),
+	.STEREO_MODE({1'b0, status[40]}),
+	.PUNCH_ENABLE(~status[43]),
+	.FIR_BYPASS(status[48]),
+	.DC_BYPASS(status[50]),
+	.ROOM_LEVEL((status[47:44] == 4'd0) ? 4'd5 :
+	            (status[47:44] == 4'd1) ? 4'd0 :
+	            (status[47:44] <= 4'd5) ? status[47:44] - 4'd1 :
+	                                      status[47:44]),
+	.VOICING((status[53:51] == 3'd0) ? 3'd1 :
+	         (status[53:51] == 3'd1) ? 3'd0 :
+	                                   status[53:51]),
+	.LEGACY_AA(~status[54]),
+
 	.CHANNEL_L(ts_l),
-	.CHANNEL_R(ts_r)
+	.CHANNEL_R(ts_r),
+
+	.HQ_VALID(hq_valid),
+	.HQ_L(hq_l),
+	.HQ_R(hq_r)
 );
 
 reg  ce_saa;  //8MHz
@@ -757,14 +789,29 @@ function [15:0] compr; input [15:0] inp;
 	end
 endfunction
 
+function [15:0] sat16; input signed [17:0] v;
+	sat16 = (v > 18'sd32767) ? 16'h7FFF : (v < -18'sd32768) ? 16'h8000 : v[15:0];
+endfunction
+
 reg [15:0] audio_l, audio_r;
 always @(posedge clk_aud) begin
 	reg [15:0] pre_l, pre_r;
+	reg signed [17:0] hs_l, hs_r;
+
 	pre_l <= {ts_l,4'd0} + {{3{gs_l[14]}}, gs_l[13:1]} + {2'b00, saa_l, 6'd0} + {3'b000, ear_out, mic_out, tape_aud, 10'd0};
 	pre_r <= {ts_r,4'd0} + {{3{gs_r[14]}}, gs_r[13:1]} + {2'b00, saa_r, 6'd0} + {3'b000, ear_out, mic_out, tape_aud, 10'd0};
 
-	audio_l <= compr(pre_l);
-	audio_r <= compr(pre_r);
+	hs_l <= ($signed({{2{hq_l[15]}}, hq_l}) <<< 1)
+	      + {{5{gs_l[14]}}, gs_l[13:1]}
+	      + {4'b00, saa_l, 6'd0}
+	      + {5'b0, ear_out, mic_out, tape_aud, 10'd0};
+	hs_r <= ($signed({{2{hq_r[15]}}, hq_r}) <<< 1)
+	      + {{5{gs_r[14]}}, gs_r[13:1]}
+	      + {4'b00, saa_r, 6'd0}
+	      + {5'b0, ear_out, mic_out, tape_aud, 10'd0};
+
+	audio_l <= ~status[42] ? sat16(hs_l) : compr(pre_l);
+	audio_r <= ~status[42] ? sat16(hs_r) : compr(pre_r);
 end
 
 assign AUDIO_L = audio_l;

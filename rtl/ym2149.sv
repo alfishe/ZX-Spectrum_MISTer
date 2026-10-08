@@ -52,6 +52,11 @@ module YM2149
 	output [7:0] CHANNEL_B, // PSG Output channel B
 	output [7:0] CHANNEL_C, // PSG Output channel C
 
+	// 5-bit pre-DAC levels (fixed volume as 2*vol+1) for the HQ output
+	output [4:0] LEVEL_A,
+	output [4:0] LEVEL_B,
+	output [4:0] LEVEL_C,
+
 	input        SEL,
 	input        MODE,
 	
@@ -192,17 +197,20 @@ always @(posedge CLK) begin
 end
 
 reg env_ena;
-wire [15:0] env_gen_comp = {ymreg[12], ymreg[11]} ? {ymreg[12], ymreg[11]} - 1'd1 : 16'd0;
+wire [15:0] env_gen_comp = {ymreg[12], ymreg[11]} ? {ymreg[12], ymreg[11]} : 16'd1;
 
 //p_envelope_freq
 always @(posedge CLK) begin
 	reg [15:0] env_gen_cnt;
 
-	if(CE) begin
+	if(env_reset | RESET) begin
+		env_gen_cnt <= 0;
+	end
+	else if(CE) begin
 		env_ena <= 0;
 		if(ena_div) begin
 			if (env_gen_cnt >= env_gen_comp) begin
-				env_gen_cnt <= 0;
+				env_gen_cnt <= 16'd1;
 				env_ena <= 1;
 			end else begin
 				env_gen_cnt <= (env_gen_cnt + 1'd1);
@@ -295,11 +303,20 @@ always @(posedge CLK) begin
 end
 
 reg [5:0] A,B,C;
+reg [4:0] lvl_a, lvl_b, lvl_c;
 always @(posedge CLK) begin
 	A <= {MODE, ~((ymreg[7][0] | tone_gen_op[1]) & (ymreg[7][3] | noise_gen_op[0])) ? 5'd0 : ymreg[8][4]  ? env_vol[4:0] : { ymreg[8][3:0],  ymreg[8][3]}};
 	B <= {MODE, ~((ymreg[7][1] | tone_gen_op[2]) & (ymreg[7][4] | noise_gen_op[1])) ? 5'd0 : ymreg[9][4]  ? env_vol[4:0] : { ymreg[9][3:0],  ymreg[9][3]}};
 	C <= {MODE, ~((ymreg[7][2] | tone_gen_op[3]) & (ymreg[7][5] | noise_gen_op[2])) ? 5'd0 : ymreg[10][4] ? env_vol[4:0] : {ymreg[10][3:0], ymreg[10][3]}};
+
+	lvl_a <= ~((ymreg[7][0] | tone_gen_op[1]) & (ymreg[7][3] | noise_gen_op[0])) ? 5'd0 : ymreg[8][4]  ? env_vol[4:0] : { ymreg[8][3:0], 1'b1};
+	lvl_b <= ~((ymreg[7][1] | tone_gen_op[2]) & (ymreg[7][4] | noise_gen_op[1])) ? 5'd0 : ymreg[9][4]  ? env_vol[4:0] : { ymreg[9][3:0], 1'b1};
+	lvl_c <= ~((ymreg[7][2] | tone_gen_op[3]) & (ymreg[7][5] | noise_gen_op[2])) ? 5'd0 : ymreg[10][4] ? env_vol[4:0] : {ymreg[10][3:0], 1'b1};
 end
+
+assign LEVEL_A = lvl_a;
+assign LEVEL_B = lvl_b;
+assign LEVEL_C = lvl_c;
 
 wire [7:0] volTable[64] = '{
 	//YM2149
