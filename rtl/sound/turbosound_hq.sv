@@ -43,6 +43,7 @@ module turbosound_hq
     input         DC_BYPASS,   // Bypass DC filter (for debugging)
     input   [3:0] ROOM_LEVEL,  // Room crossfeed level (0=off, 1-9)
     input   [2:0] VOICING,     // Tone voicing profile (ay_voicing: 0=Flat, 1=Classic, ...)
+    input         LEGACY_AA,   // HQ off: band-limit the legacy output with the HQ FIR
 
     // 12-bit legacy output (compatible with existing design)
     output [11:0] CHANNEL_L,
@@ -214,8 +215,39 @@ always @(posedge CLK) begin
     ch_r <= ~ENABLE ? 12'd0 : fm_ena ? $signed(opn_s) + $signed(psg_r) : $signed(psg_r);
 end
 
-assign CHANNEL_L = ch_l;
-assign CHANNEL_R = ch_r;
+// Legacy anti-aliasing (HQ off). The legacy levels change on generator
+// ticks only, so the 12-bit legacy output is a 218.75 kHz stream of square
+// edges; the framework samples it at 48 kHz behind a 3rd-order IIR, and the
+// harmonics above 24 kHz fold back as inharmonic tones only 28-47 dB below
+// the note ("dirty", overload-like sound). With LEGACY_AA the idle HQ FIR
+// (20 kHz) band-limits it first: aliasing drops to the HQ level (57-68 dB)
+// while the legacy volume curve, mix and top-level compressor are kept.
+// Without LEGACY_AA the output is the unfiltered legacy value, as upstream.
+wire legacy_aa = ~HQ_ENABLE & LEGACY_AA;
+
+// FIR outputs (the FIR is instantiated with the HQ chain below)
+wire fir_valid_raw_l, fir_valid_raw_r;
+wire signed [31:0] fir_raw_l, fir_raw_r;
+
+function [11:0] sat12_round;          // Q4.28 (value / 4096) -> signed 12-bit
+    input signed [31:0] v;
+    reg   signed [31:0] r;
+    begin
+        r = (v + 32'sd32768) >>> 16;
+        sat12_round = (r > 32'sd2047) ? 12'h7FF : (r < -32'sd2048) ? 12'h800 : r[11:0];
+    end
+endfunction
+
+reg [11:0] aa_l, aa_r;
+always @(posedge CLK) begin
+    if (fir_valid_raw_l) begin
+        aa_l <= sat12_round(fir_raw_l);
+        aa_r <= sat12_round(fir_raw_r);
+    end
+end
+
+assign CHANNEL_L = legacy_aa ? aa_l : ch_l;
+assign CHANNEL_R = legacy_aa ? aa_r : ch_r;
 
 // ============================================================================
 // HQ Audio Pipeline
@@ -306,15 +338,18 @@ ay_dc_filter dc_filt_r (
 wire signed [31:0] dc_filtered_l = DC_BYPASS ? $signed(mixed_l) - 32'sh04000000 : dc_raw_l;
 wire signed [31:0] dc_filtered_r = DC_BYPASS ? $signed(mixed_r) - 32'sh04000000 : dc_raw_r;
 
-// FIR decimator (218.75 kHz -> 44.1 kHz) - optional bypass
-wire fir_valid_raw_l, fir_valid_raw_r;
-wire signed [31:0] fir_raw_l, fir_raw_r;
+// FIR: 20 kHz low-pass at the generator rate (no decimation) - optional bypass
+
+// FIR input: the HQ chain, or with HQ off + LEGACY_AA the legacy output
+// (signed 12-bit, as the top level reads it; scaled to Q4.28 as value / 4096)
+wire signed [31:0] fir_in_l = legacy_aa ? {{4{ch_l[11]}}, ch_l, 16'd0} : dc_filtered_l;
+wire signed [31:0] fir_in_r = legacy_aa ? {{4{ch_r[11]}}, ch_r, 16'd0} : dc_filtered_r;
 
 ay_fir_decimator fir_l (
     .clk       (CLK),
     .ce_in     (ce_gen),
     .reset     (RESET_s),
-    .in_sample (dc_filtered_l),
+    .in_sample (fir_in_l),
     .out_valid (fir_valid_raw_l),
     .out_sample(fir_raw_l)
 );
@@ -323,7 +358,7 @@ ay_fir_decimator fir_r (
     .clk       (CLK),
     .ce_in     (ce_gen),
     .reset     (RESET_s),
-    .in_sample (dc_filtered_r),
+    .in_sample (fir_in_r),
     .out_valid (fir_valid_raw_r),
     .out_sample(fir_raw_r)
 );

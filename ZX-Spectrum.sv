@@ -88,11 +88,12 @@ localparam CONF_STR = {
 	"P3O[41],PSG Model,YM2149,AY8910;",
 	"P3-;",
 	"P3O[42],HQ Audio,On,Off;",
-	"P3O[43],HQ Punch,On,Off;",
-	"P3O[48],HQ FIR,On,Off;",
-	"P3O[50],HQ DC Filter,On,Off;",
-	"P3O[47:44],HQ Room,9dB,Off,15dB,14dB,13dB,12dB,6dB,3dB,2dB,1dB;",
-	"P3O[53:51],HQ Voicing,Classic,Flat,Headphones,Warm,TV,Small Speaker;",
+	"d4P3O[54],PSG Anti-alias,On,Off;",
+	"D4P3O[43],HQ Punch,On,Off;",
+	"D4P3O[48],HQ FIR,On,Off;",
+	"D4P3O[50],HQ DC Filter,On,Off;",
+	"D4P3O[47:44],HQ Room,9dB,Off,15dB,14dB,13dB,12dB,6dB,3dB,2dB,1dB;",
+	"D4P3O[53:51],HQ Voicing,Classic,Flat,Headphones,Warm,TV,Small Speaker;",
 
 	"P2,Hardware & Input;",
 	"P2-;",
@@ -292,7 +293,7 @@ hps_io #(.CONF_STR(CONF_STR), .VDNUM(2)) hps_io
 	.forced_scandoubler(forced_scandoubler),
 	.new_vmode(new_vmode),
 	.status(status),
-	.status_menumask({|status[9:8],en1080p,|vcrop,~need_apply}),
+	.status_menumask({status[42],|status[9:8],en1080p,|vcrop,~need_apply}),  // bit 4: HQ Audio Off
 	.status_set(speed_set|arch_set|snap_hwset),
 	.status_in({status[63:25], speed_set ? speed_req : 3'b000, status[21:13], arch_set ? arch : snap_hwset ? snap_hw : status[12:8], status[7:0]}),
 
@@ -682,6 +683,8 @@ turbosound_hq turbosound
 	.VOICING((status[53:51] == 3'd0) ? 3'd1 :
 	         (status[53:51] == 3'd1) ? 3'd0 :
 	                                   status[53:51]),
+	// HQ off: band-limit the legacy output (default On; Off = upstream output)
+	.LEGACY_AA(~status[54]),
 
 	// Legacy 12-bit output
 	.CHANNEL_L(ts_l),
