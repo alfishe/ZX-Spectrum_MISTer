@@ -1,17 +1,21 @@
 //
 // AY-3-8910 DC Offset Filter
 //
-// 1024-sample moving average high-pass filter.
-// Matches unreal-ng FilterDC::filter():
-//   sum += x - buf[i]; buf[i] = x; i = (i+1) & 1023;
-//   y = x - sum/1024;
-// The averaging window INCLUDES the current sample (x[n-1023]..x[n]).
+// One-pole RC high-pass at 5 Hz: the discrete model of the output coupling
+// capacitor. Matches unreal-ng FilterDCBlocker (AY OUTPUT_HIGHPASS_HZ = 5):
+//   y[n] = a * (y[n-1] + x[n] - x[n-1]),  a = RC / (RC + dt)
+// computed as y = s - k*s with s = y[n-1] + x[n] - x[n-1], k = 1 - a.
+//
+// It replaces the 1024-sample moving-average remover (x - mean of the last
+// 1024 samples), as unreal-ng did: that filter returned every burst as a
+// delayed step one window (4.68 ms) later and cut the bass (-21 dB at 50 Hz,
+// -10 dB at 100 Hz). The tonal balance of the old filter is now provided by
+// the "Classic" voicing profile (ay_voicing), as in unreal-ng.
 //
 // Input:  Q4.28 unsigned (positive only, < 8.0)
-// Output: Q4.28 signed (centered around zero)
-//
-// The delay RAM is swept to zero after reset (S_CLEAR) so a warm reset
-// cannot underflow the running sum with stale samples.
+// Output: Q4.28 signed
+// State:  y kept with 16 extra fraction bits (Q.44): k is ~1.4e-4, so the
+//         feedback needs more precision than the output to stay exact.
 //
 // Copyright (c) 2025 - Port from unreal-ng emulator
 //
@@ -26,80 +30,52 @@ module ay_dc_filter
     output reg  signed [31:0] out_sample   // Q4.28 signed output
 );
 
-localparam BUFFER_SIZE = 1024;
-localparam BUFFER_BITS = 10;  // log2(1024)
+// k = 1 - a for fc = 5 Hz at 218.75 kHz, Q0.40 (FilterDCBlocker::coefficient()
+// at the generator rate: a = 0.999856404958, k = 1.435950416668e-04)
+localparam signed [29:0] DC_K = 30'sd157884418;
 
-// Delay line buffer - explicitly inferred as block RAM
-(* ram_style = "block" *) reg [31:0] delay_buffer [0:BUFFER_SIZE-1];
+reg signed [32:0] x1;            // previous input, Q4.28 (sign-extended)
+reg signed [55:0] y;             // output state, Q.44
+reg signed [55:0] s;             // y[n-1] + x[n] - x[n-1], Q.44
+reg signed [85:0] ks;            // s * k, Q.84
+reg        [1:0]  state;
 
-reg [BUFFER_BITS-1:0] wr_index;
+localparam S_IDLE = 2'd0;
+localparam S_MUL  = 2'd1;
+localparam S_OUT  = 2'd2;
 
-// Running sum: 32-bit values * 1024 samples needs 42 bits
-// Use 48 bits for safety, unsigned
-reg [47:0] running_sum;
-
-// Registered read from RAM
-reg [31:0] oldest_sample;
-
-// Pipeline state
-reg [1:0] state;
-reg [31:0] in_sample_r;
-
-localparam S_CLEAR  = 2'd3;
-localparam S_IDLE   = 2'd0;
-localparam S_READ   = 2'd1;
-localparam S_CALC   = 2'd2;
-
-// Sum including the current sample - matches software window exactly
-wire [47:0] new_sum = running_sum - {16'd0, oldest_sample} + {16'd0, in_sample_r};
+wire signed [32:0] x_in = $signed({1'b0, in_sample});
+wire signed [55:0] y_new = s - $signed(ks[85:40]);
+wire signed [55:0] y_rnd = y_new + 56'sd32768;   // round Q.44 -> Q.28
 
 always @(posedge clk) begin
     if (reset) begin
-        wr_index <= 0;
-        running_sum <= 0;
+        x1 <= 0;
+        y <= 0;
+        s <= 0;
+        ks <= 0;
         out_sample <= 0;
-        oldest_sample <= 0;
-        state <= S_CLEAR;
-        in_sample_r <= 0;
+        state <= S_IDLE;
     end
     else begin
         case (state)
-            S_CLEAR: begin
-                // Sweep-clear the delay RAM (1024 cycles after reset)
-                delay_buffer[wr_index] <= 32'd0;
-                wr_index <= wr_index + 1'd1;
-                if (wr_index == BUFFER_SIZE-1)
-                    state <= S_IDLE;
-            end
-
             S_IDLE: begin
                 if (ce) begin
-                    // Latch input and start read
-                    in_sample_r <= in_sample;
-                    // Read oldest sample (block RAM has 1 cycle latency)
-                    oldest_sample <= delay_buffer[wr_index];
-                    state <= S_READ;
+                    s <= y + ($signed(x_in - x1) <<< 16);
+                    x1 <= x_in;
+                    state <= S_MUL;
                 end
             end
 
-            S_READ: begin
-                // oldest_sample is now valid
-                // Write new sample to buffer
-                delay_buffer[wr_index] <= in_sample_r;
-                state <= S_CALC;
+            S_MUL: begin
+                ks <= s * DC_K;
+                state <= S_OUT;
             end
 
-            S_CALC: begin
-                // Update running sum: remove oldest, add new (current sample
-                // included in the window, as in software)
-                running_sum <= new_sum;
-
-                // Output = input - average(window including current sample)
-                out_sample <= $signed({1'b0, in_sample_r}) - $signed({1'b0, new_sum[41:10]});
-
-                // Advance index
-                wr_index <= wr_index + 1'd1;
-
+            S_OUT: begin
+                y <= y_new;
+                // Q.44 -> Q4.28 with rounding
+                out_sample <= y_rnd[47:16];
                 state <= S_IDLE;
             end
 

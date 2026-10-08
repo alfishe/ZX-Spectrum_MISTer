@@ -92,6 +92,7 @@ localparam CONF_STR = {
 	"P3O[48],HQ FIR,On,Off;",
 	"P3O[50],HQ DC Filter,On,Off;",
 	"P3O[47:44],HQ Room,6dB,Off,15dB,14dB,13dB,12dB,9dB,3dB,2dB,1dB;",
+	"P3O[53:51],HQ Voicing,Classic,Flat,Headphones,Warm,TV,Small Speaker;",
 
 	"P2,Hardware & Input;",
 	"P2-;",
@@ -666,7 +667,9 @@ turbosound_hq turbosound
 	// HQ configuration
 	// Option label order puts the default (status=0) first: HQ Audio and
 	// Punch default On (inverted bits), Room defaults to 6dB (menu index 0
-	// remapped to module level 6; menu 1=Off, 2..6 = 15..9dB, 7..9 = 3..1dB)
+	// remapped to module level 6; menu 1=Off, 2..6 = 15..9dB, 7..9 = 3..1dB).
+	// Voicing defaults to Classic, the unreal-ng default: menu 0 = Classic
+	// (profile 1), 1 = Flat (profile 0), 2..5 as is.
 	.HQ_ENABLE(~status[42]),
 	.STEREO_MODE({1'b0, status[40]}),  // ABC/ACB from existing setting
 	.PUNCH_ENABLE(~status[43]),
@@ -676,6 +679,9 @@ turbosound_hq turbosound
 	            (status[47:44] == 4'd1) ? 4'd0 :
 	            (status[47:44] <= 4'd6) ? status[47:44] - 4'd1 :
 	                                      status[47:44]),
+	.VOICING((status[53:51] == 3'd0) ? 3'd1 :
+	         (status[53:51] == 3'd1) ? 3'd0 :
+	                                   status[53:51]),
 
 	// Legacy 12-bit output
 	.CHANNEL_L(ts_l),

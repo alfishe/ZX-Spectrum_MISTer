@@ -42,6 +42,7 @@ module turbosound_hq
     input         FIR_BYPASS,  // Bypass FIR filter (for debugging)
     input         DC_BYPASS,   // Bypass DC filter (for debugging)
     input   [3:0] ROOM_LEVEL,  // Room crossfeed level (0=off, 1-9)
+    input   [2:0] VOICING,     // Tone voicing profile (ay_voicing: 0=Flat, 1=Classic, ...)
 
     // 12-bit legacy output (compatible with existing design)
     output [11:0] CHANNEL_L,
@@ -333,28 +334,45 @@ wire fir_valid = FIR_BYPASS ? ce_gen : fir_valid_raw_l;
 wire signed [31:0] fir_out_l = FIR_BYPASS ? dc_filtered_l : fir_raw_l;
 wire signed [31:0] fir_out_r = FIR_BYPASS ? dc_filtered_r : fir_raw_r;
 
-// Stage handoff timing: the punch FSM needs up to 18 clk after fir_valid,
-// the room FSM 5 clk. Delay each downstream stage's clock enable so it
-// consumes the CURRENT upstream sample instead of the previous one.
-reg [30:0] valid_sr;
+// Stage handoff timing: the voicing engine needs up to 40 clk after
+// fir_valid, the punch FSM 18 clk, the room FSM 5 clk. Delay each downstream
+// stage's clock enable so it consumes the CURRENT upstream sample instead of
+// the previous one. Total 74 clk, well inside one generator tick (256 clk).
+reg [73:0] valid_sr;
 always @(posedge CLK) begin
     if (RESET_s) valid_sr <= '0;
-    else         valid_sr <= {valid_sr[29:0], fir_valid};
+    else         valid_sr <= {valid_sr[72:0], fir_valid};
 end
-wire room_ce   = valid_sr[23];  // punch settled (18 clk) + margin
-wire out_latch = valid_sr[30];  // room settled (+5 clk) + margin
+wire punch_ce  = valid_sr[42];  // voicing settled (40 clk) + margin
+wire room_ce   = valid_sr[66];  // punch settled (18 clk) + margin
+wire out_latch = valid_sr[73];  // room settled (+5 clk) + margin
+
+// Tone voicing (unreal-ng FilterVoicing): before the character chain, as in
+// unreal-ng (SoundManager voices the chip buffers, then runs punch / room)
+wire signed [31:0] voiced_l, voiced_r;
+
+ay_voicing voicing (
+    .clk       (CLK),
+    .ce        (fir_valid),
+    .reset     (RESET_s),
+    .preset    (VOICING),
+    .in_left   (fir_out_l),
+    .in_right  (fir_out_r),
+    .out_left  (voiced_l),
+    .out_right (voiced_r)
+);
 
 // Punch enhancement
 wire signed [31:0] punch_out_l, punch_out_r;
 
 ay_punch_enhancer punch (
     .clk       (CLK),
-    .ce        (fir_valid),
+    .ce        (punch_ce),
     .reset     (RESET_s),
     .enable    (PUNCH_ENABLE),
     .preset    (1'b0),  // AY preset (gentle)
-    .in_left   (fir_out_l),
-    .in_right  (fir_out_r),
+    .in_left   (voiced_l),
+    .in_right  (voiced_r),
     .out_left  (punch_out_l),
     .out_right (punch_out_r)
 );
