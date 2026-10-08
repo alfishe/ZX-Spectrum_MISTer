@@ -52,9 +52,7 @@ module YM2149
 	output [7:0] CHANNEL_B, // PSG Output channel B
 	output [7:0] CHANNEL_C, // PSG Output channel C
 
-	// Raw 5-bit pre-DAC channel levels for external HQ pipeline.
-	// Fixed volumes map as 2*vol+1 (unreal-ng convention), envelope passes
-	// env_vol directly, gated channels output 0.
+	// 5-bit pre-DAC levels (fixed volume as 2*vol+1) for the HQ output
 	output [4:0] LEVEL_A,
 	output [4:0] LEVEL_B,
 	output [4:0] LEVEL_C,
@@ -199,11 +197,6 @@ always @(posedge CLK) begin
 end
 
 reg env_ena;
-// Envelope prescaler phase matches unreal-ng EnvelopeGenerator:
-// step every `period` ticks, first step `period+1` ticks after the shape
-// write (counter compares BEFORE increment, counts 1..period after a step).
-// The previous comp=period-1 form stepped one tick early relative to the
-// tone generators, misaligning envelope-gated bass by one 218.75 kHz tick.
 wire [15:0] env_gen_comp = {ymreg[12], ymreg[11]} ? {ymreg[12], ymreg[11]} : 16'd1;
 
 //p_envelope_freq
@@ -211,7 +204,7 @@ always @(posedge CLK) begin
 	reg [15:0] env_gen_cnt;
 
 	if(env_reset | RESET) begin
-		env_gen_cnt <= 0;   // shape write restarts the prescaler (as software)
+		env_gen_cnt <= 0;
 	end
 	else if(CE) begin
 		env_ena <= 0;
@@ -316,7 +309,6 @@ always @(posedge CLK) begin
 	B <= {MODE, ~((ymreg[7][1] | tone_gen_op[2]) & (ymreg[7][4] | noise_gen_op[1])) ? 5'd0 : ymreg[9][4]  ? env_vol[4:0] : { ymreg[9][3:0],  ymreg[9][3]}};
 	C <= {MODE, ~((ymreg[7][2] | tone_gen_op[3]) & (ymreg[7][5] | noise_gen_op[2])) ? 5'd0 : ymreg[10][4] ? env_vol[4:0] : {ymreg[10][3:0], ymreg[10][3]}};
 
-	// HQ tap: same gating, but fixed volumes use the unreal-ng 2*vol+1 mapping
 	lvl_a <= ~((ymreg[7][0] | tone_gen_op[1]) & (ymreg[7][3] | noise_gen_op[0])) ? 5'd0 : ymreg[8][4]  ? env_vol[4:0] : { ymreg[8][3:0], 1'b1};
 	lvl_b <= ~((ymreg[7][1] | tone_gen_op[2]) & (ymreg[7][4] | noise_gen_op[1])) ? 5'd0 : ymreg[9][4]  ? env_vol[4:0] : { ymreg[9][3:0], 1'b1};
 	lvl_c <= ~((ymreg[7][2] | tone_gen_op[3]) & (ymreg[7][5] | noise_gen_op[2])) ? 5'd0 : ymreg[10][4] ? env_vol[4:0] : {ymreg[10][3:0], 1'b1};

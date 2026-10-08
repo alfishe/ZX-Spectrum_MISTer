@@ -1,37 +1,10 @@
 //
 // AY-3-8910 Tone Voicing (fixed tonal-balance EQ)
 //
-// Port of unreal-ng FilterVoicing: per profile up to three biquad sections
-// (optional high-pass, optional peaking EQ, optional low-pass), run in that
-// order on each channel. It sits between the FIR and the punch enhancer, as
-// in unreal-ng (voicing before the character chain).
-//
-// Profiles (unreal-ng order and IDs):
-//   0 Flat          no processing (exact bypass)
-//   1 Classic       64.2 Hz 1st-order HPF + 106.9 Hz / +3.06 dB peak, Q 1
-//                   (the bass balance of the old moving-average DC remover)
-//   2 Headphones    Classic + 10 kHz low-pass (Q 0.5)
-//   3 Warm          90 Hz 2nd-order HPF (Q 0.6) + 8 kHz low-pass (Q 0.5)
-//   4 TV            130 Hz HPF + 6 kHz LPF (2nd-order Butterworth)
-//   5 Small speaker 250 Hz HPF + 1.5 kHz / +3 dB peak + 4.5 kHz LPF
-//
-// The coefficients are unreal-ng's own design (FilterVoicing::design(),
-// bilinear HPF, RBJ peak, magnitude-matched LPF) evaluated at the generator
-// rate 218.75 kHz, in Q2.30. Unused sections are identity (b0 = 1.0).
-// High-pass rows keep b1 = -(b0 + b2) exactly after quantisation, so their
-// zeros stay at z = 1 (no DC leak).
-//
-// Each section computes, in direct form I:
-//   y = b0 x + b1 x1 + b2 x2 - a1 y1 - a2 y2
-// Ports are Q4.28. Inside, samples and section state are Q6.40 (46 bits): with
-// poles near z = 1 (64 Hz at 218.75 kHz) the rounding noise of each section
-// is amplified ~10^3 times, which at Q.28 reached ~0.9 LSB of the 16-bit
-// output; 12 more fraction bits put it ~4000x lower. The accumulator keeps
-// the full Q.70 sum of products and rounds once per section.
-//
-// One shared 32x32 multiplier: 6 clocks per section (5 MAC + round), three
-// sections per channel, two channels: outputs are stable LATENCY clocks after
-// ce. A profile change clears the filter state (as FilterVoicing::setPreset).
+// unreal-ng FilterVoicing: up to three biquads (HPF, peaking EQ, LPF) per channel.
+// Profiles: 0 Flat, 1 Classic, 2 Headphones, 3 Warm, 4 TV, 5 Small speaker.
+// Coefficients are unreal-ng's design at 218.75 kHz (Q2.30); state Q6.40.
+// One shared multiplier; outputs are valid LATENCY clocks after ce.
 //
 // Copyright (c) 2025 - Port from unreal-ng emulator
 //
@@ -39,9 +12,9 @@
 module ay_voicing
 (
     input  wire        clk,
-    input  wire        ce,             // input sample valid (generator rate)
+    input  wire        ce,
     input  wire        reset,
-    input  wire [2:0]  preset,         // 0..5, see above (6, 7 = Flat)
+    input  wire [2:0]  preset,         // 0..5 (6, 7 = Flat)
 
     input  wire signed [31:0] in_left,     // Q4.28
     input  wire signed [31:0] in_right,
@@ -49,10 +22,9 @@ module ay_voicing
     output reg  signed [31:0] out_right
 );
 
-localparam LATENCY = 40;   // clocks from ce to stable outputs (worst case 38)
+localparam LATENCY = 40;
 
-// {b0, b1, b2, a1, a2} in Q2.30 per (profile, section): generated from
-// unreal-ng FilterVoicing at 218750 Hz
+// {b0, b1, b2, a1, a2} per (profile, section)
 function [159:0] voicing_coef;
     input [4:0] row;
     begin
@@ -91,9 +63,9 @@ reg  [1:0]  state;
 reg         ch;
 reg  [1:0]  sec;
 reg  [2:0]  term;
-reg signed [45:0] v;            // current section input, Q6.40
-reg signed [31:0] in_r_hold;    // right input, latched at ce
-reg signed [81:0] acc;          // Q.70
+reg signed [45:0] v;
+reg signed [31:0] in_r_hold;
+reg signed [81:0] acc;
 
 localparam S_IDLE = 2'd0;
 localparam S_MAC  = 2'd1;
@@ -116,14 +88,12 @@ wire signed [45:0] op     = (term == 3'd0) ? v :
                                              y2[idx];
 wire signed [77:0] prod = c_term * op;
 
-// Round Q.70 -> Q6.40 (section output / state) and saturate to 46 bits
 wire signed [81:0] acc_rnd = acc + 82'sd536870912;
 wire signed [51:0] y_full  = acc_rnd[81:30];
 wire signed [45:0] y_sat   = (y_full > 52'sh001FFFFFFFFFFF) ? 46'sh1FFFFFFFFFFF :
                              (y_full < -52'sh00200000000000) ? -46'sh200000000000 :
                              y_full[45:0];
 
-// Port output: Q6.40 -> Q4.28, rounded and saturated to 32 bits
 wire signed [45:0] y_out_rnd = y_sat + 46'sd2048;
 wire signed [33:0] y_out_full = y_out_rnd[45:12];
 wire signed [31:0] y_out = (y_out_full > 34'sh07FFFFFFF) ? 32'sh7FFFFFFF :
@@ -149,7 +119,6 @@ always @(posedge clk) begin
         case (state)
             S_IDLE: begin
                 if (ce) begin
-                    // A profile change restarts the filters from a clear state
                     if (preset != preset_r) begin
                         for (k = 0; k < 6; k = k + 1) begin
                             x1[k] <= 0; x2[k] <= 0; y1[k] <= 0; y2[k] <= 0;

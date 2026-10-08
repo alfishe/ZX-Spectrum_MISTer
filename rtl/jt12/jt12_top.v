@@ -41,7 +41,6 @@ module jt12_top (
     output          [ 7:0] psg_A,
     output          [ 7:0] psg_B,
     output          [ 7:0] psg_C,
-    // Raw 5-bit pre-DAC PSG levels (unreal-ng mapping) for HQ pipeline
     output          [ 4:0] psg_lvl_A,
     output          [ 4:0] psg_lvl_B,
     output          [ 4:0] psg_lvl_C,

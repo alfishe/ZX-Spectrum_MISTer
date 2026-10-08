@@ -35,29 +35,23 @@ module turbosound_hq
     input   [7:0] DI,          // Data In
     output  [7:0] DO,          // Data Out
 
-    // HQ configuration
     input         HQ_ENABLE,   // Enable HQ audio pipeline
     input   [1:0] STEREO_MODE, // 0=ABC, 1=ACB, 2=Mono
     input         PUNCH_ENABLE,// Enable punch enhancement
     input         FIR_BYPASS,  // Bypass FIR filter (for debugging)
     input         DC_BYPASS,   // Bypass DC filter (for debugging)
     input   [3:0] ROOM_LEVEL,  // Room crossfeed level (0=off, 1-9)
-    input   [2:0] VOICING,     // Tone voicing profile (ay_voicing: 0=Flat, 1=Classic, ...)
-    input         LEGACY_AA,   // HQ off: band-limit the legacy output with the HQ FIR
+    input   [2:0] VOICING,     // 0=Flat, 1=Classic, 2=Headphones, 3=Warm, 4=TV, 5=Small speaker
+    input         LEGACY_AA,   // HQ off: band-limit the legacy output
 
-    // 12-bit legacy output (compatible with existing design)
     output [11:0] CHANNEL_L,
     output [11:0] CHANNEL_R,
 
-    // 16-bit HQ output
-    output        HQ_VALID,    // Pulse at 44.1kHz when HQ sample ready
+    output        HQ_VALID,    // HQ sample strobe
     output signed [15:0] HQ_L,
     output signed [15:0] HQ_R
 );
 
-// ============================================================================
-// Input synchronization
-// ============================================================================
 
 reg       RESET_s;
 reg       BDIR_s;
@@ -81,9 +75,6 @@ always_ff @(posedge CLK) begin
     DI_s <= DI_d;
 end
 
-// ============================================================================
-// Chip selection and FM enable logic
-// ============================================================================
 
 reg ay_select = 1;
 reg stat_sel  = 1;
@@ -125,9 +116,6 @@ always_ff @(posedge CLK or posedge RESET_s) begin
     end
 end
 
-// ============================================================================
-// YM2203 chips (jt03)
-// ============================================================================
 
 wire  [7:0] psg_ch_a_0;
 wire  [7:0] psg_ch_b_0;
@@ -189,9 +177,6 @@ jt03 ym2203_1
 
 assign DO = ay_select ? DO_1 : DO_0;
 
-// ============================================================================
-// Legacy mixer (12-bit output, compatible with original)
-// ============================================================================
 
 reg  [8:0] sum_ch_a, sum_ch_b, sum_ch_c;
 reg  [7:0] psg_a, psg_b, psg_c;
@@ -215,21 +200,13 @@ always @(posedge CLK) begin
     ch_r <= ~ENABLE ? 12'd0 : fm_ena ? $signed(opn_s) + $signed(psg_r) : $signed(psg_r);
 end
 
-// Legacy anti-aliasing (HQ off). The legacy levels change on generator
-// ticks only, so the 12-bit legacy output is a 218.75 kHz stream of square
-// edges; the framework samples it at 48 kHz behind a 3rd-order IIR, and the
-// harmonics above 24 kHz fold back as inharmonic tones only 28-47 dB below
-// the note ("dirty", overload-like sound). With LEGACY_AA the idle HQ FIR
-// (20 kHz) band-limits it first: aliasing drops to the HQ level (57-68 dB)
-// while the legacy volume curve, mix and top-level compressor are kept.
-// Without LEGACY_AA the output is the unfiltered legacy value, as upstream.
+// HQ off + LEGACY_AA: band-limit the legacy output with the idle HQ FIR
 wire legacy_aa = ~HQ_ENABLE & LEGACY_AA;
 
-// FIR outputs (the FIR is instantiated with the HQ chain below)
 wire fir_valid_raw_l, fir_valid_raw_r;
 wire signed [31:0] fir_raw_l, fir_raw_r;
 
-function [11:0] sat12_round;          // Q4.28 (value / 4096) -> signed 12-bit
+function [11:0] sat12_round;          // Q4.28 -> signed 12-bit
     input signed [31:0] v;
     reg   signed [31:0] r;
     begin
@@ -249,15 +226,8 @@ end
 assign CHANNEL_L = legacy_aa ? aa_l : ch_l;
 assign CHANNEL_R = legacy_aa ? aa_r : ch_r;
 
-// ============================================================================
-// HQ Audio Pipeline
-// ============================================================================
 
-// Generator clock enable: CE / 16 = 218.75 kHz
-// CE is 3.5 MHz. The embedded YM2149 SSG receives clk_en_ssg = CE/2 = 1.75 MHz
-// and divides internally by 8 (SEL=0), so channel levels update at exactly
-// 3.5 MHz / 16 = 218.75 kHz. This divider is frequency-locked to that rate,
-// matching the unreal-ng software generator rate (AY clock 1.75 MHz / 8).
+// generator rate: CE / 16 = 218.75 kHz
 reg [3:0] gen_div;
 wire ce_gen = CE && (gen_div == 0);
 
@@ -268,10 +238,7 @@ always @(posedge CLK) begin
         gen_div <= gen_div + 1'd1;
 end
 
-// HQ DAC: exact unreal-ng amplitude tables, fed from the 5-bit pre-DAC
-// levels of both chips. The two chips are summed here WITHOUT saturation
-// (matching software TurboSound float addition); dac_* range is [0.0, 2.0)
-// and the /3 folded into the pan coefficients keeps the final mix <= 1.0.
+// both chips summed unsaturated; the / 3 is folded into the pans
 wire [31:0] dac_a, dac_b, dac_c;
 
 ay_dac dac_ch_a (
@@ -298,7 +265,6 @@ ay_dac dac_ch_c (
     .dac_out (dac_c)
 );
 
-// Stereo mixer
 wire [31:0] mixed_l, mixed_r;
 
 ay_stereo_mixer stereo_mix (
@@ -312,7 +278,6 @@ ay_stereo_mixer stereo_mix (
     .out_right   (mixed_r)
 );
 
-// DC offset filter (optional bypass)
 wire signed [31:0] dc_raw_l, dc_raw_r;
 
 ay_dc_filter dc_filt_l (
@@ -331,17 +296,12 @@ ay_dc_filter dc_filt_r (
     .out_sample(dc_raw_r)
 );
 
-// DC filter bypass mux - when bypassed, subtract the typical signal mean.
-// mixed range is [0, ~0.5] single-chip, so center around 0.25 (Q4.28).
-// (The old constant 1.0 slammed the signal to -0.75 FS into the output
-// compressor = severe distortion whenever the bypass was selected.)
+// bypass: subtract the typical mean (0.25)
 wire signed [31:0] dc_filtered_l = DC_BYPASS ? $signed(mixed_l) - 32'sh04000000 : dc_raw_l;
 wire signed [31:0] dc_filtered_r = DC_BYPASS ? $signed(mixed_r) - 32'sh04000000 : dc_raw_r;
 
-// FIR: 20 kHz low-pass at the generator rate (no decimation) - optional bypass
 
-// FIR input: the HQ chain, or with HQ off + LEGACY_AA the legacy output
-// (signed 12-bit, as the top level reads it; scaled to Q4.28 as value / 4096)
+// HQ off + LEGACY_AA: the legacy output (signed 12-bit) as value / 4096
 wire signed [31:0] fir_in_l = legacy_aa ? {{4{ch_l[11]}}, ch_l, 16'd0} : dc_filtered_l;
 wire signed [31:0] fir_in_r = legacy_aa ? {{4{ch_r[11]}}, ch_r, 16'd0} : dc_filtered_r;
 
@@ -363,27 +323,20 @@ ay_fir_decimator fir_r (
     .out_sample(fir_raw_r)
 );
 
-// FIR bypass: pass the DC-filtered stream straight through at full rate.
-// (No decimation anywhere, so bypassing the FIR is a pure filter A/B.)
 wire fir_valid = FIR_BYPASS ? ce_gen : fir_valid_raw_l;
 wire signed [31:0] fir_out_l = FIR_BYPASS ? dc_filtered_l : fir_raw_l;
 wire signed [31:0] fir_out_r = FIR_BYPASS ? dc_filtered_r : fir_raw_r;
 
-// Stage handoff timing: the voicing engine needs up to 40 clk after
-// fir_valid, the punch FSM 18 clk, the room FSM 5 clk. Delay each downstream
-// stage's clock enable so it consumes the CURRENT upstream sample instead of
-// the previous one. Total 74 clk, well inside one generator tick (256 clk).
+// stage strobes: voicing up to 40 clk, punch 18 clk, room 5 clk
 reg [73:0] valid_sr;
 always @(posedge CLK) begin
     if (RESET_s) valid_sr <= '0;
     else         valid_sr <= {valid_sr[72:0], fir_valid};
 end
-wire punch_ce  = valid_sr[42];  // voicing settled (40 clk) + margin
-wire room_ce   = valid_sr[66];  // punch settled (18 clk) + margin
-wire out_latch = valid_sr[73];  // room settled (+5 clk) + margin
+wire punch_ce  = valid_sr[42];
+wire room_ce   = valid_sr[66];
+wire out_latch = valid_sr[73];
 
-// Tone voicing (unreal-ng FilterVoicing): before the character chain, as in
-// unreal-ng (SoundManager voices the chip buffers, then runs punch / room)
 wire signed [31:0] voiced_l, voiced_r;
 
 ay_voicing voicing (
@@ -397,7 +350,6 @@ ay_voicing voicing (
     .out_right (voiced_r)
 );
 
-// Punch enhancement
 wire signed [31:0] punch_out_l, punch_out_r;
 
 ay_punch_enhancer punch (
@@ -405,14 +357,13 @@ ay_punch_enhancer punch (
     .ce        (punch_ce),
     .reset     (RESET_s),
     .enable    (PUNCH_ENABLE),
-    .preset    (1'b0),  // AY preset (gentle)
+    .preset    (1'b0),
     .in_left   (voiced_l),
     .in_right  (voiced_r),
     .out_left  (punch_out_l),
     .out_right (punch_out_r)
 );
 
-// Room crossfeed
 wire [31:0] room_out_l, room_out_r;
 
 ay_room_crossfeed room (
@@ -427,28 +378,17 @@ ay_room_crossfeed room (
     .out_right  (room_out_r)
 );
 
-// Output conversion: Q4.28 to 16-bit signed
-// The room_out is in Q4.28 format. We need to extract 16 bits.
-// For Q4.28: bits [30:15] give us a 16-bit value with 2 integer bits headroom
-//
-// Add FM sound if enabled - scale FM to match Q4.28
-// opn_s is 12-bit signed, scale it to Q4.28: shift left 16 bits
+// FM scaled to Q4.28
 wire signed [31:0] fm_scaled = fm_ena ? {{4{opn_s[11]}}, opn_s, 16'd0} : 32'd0;
 wire signed [31:0] final_l = room_out_l + fm_scaled;
 wire signed [31:0] final_r = room_out_r + fm_scaled;
 
-// Saturation and output extraction
-// The ZX top level feeds this into compr(), a 2x-gain compressor with its
-// knee at |14044|. The HQ signal must stay below the knee to remain linear:
-// single-chip |mixed| <= 0.5, so scale 1.0 -> 16384 (>>> 14) giving peaks
-// of +/-8192 - comfortably linear, and compr's 2x restores the loudness.
-// (>>> 13 put envelope-bass peaks at 16384, straddling the knee: 4:1
-// crush above / 2x below = the audible "squeaking" distortion.)
+// Q4.28 -> int16, 1.0 = 16384
 function signed [15:0] saturate;
     input signed [31:0] val;
     reg signed [18:0] extracted;
     begin
-        extracted = val >>> 14;  // Q4.28 -> int16 with 1.0 = 16384
+        extracted = val >>> 14;
         if (extracted > 19'sh07FFF)
             saturate = 16'sh7FFF;
         else if (extracted < -19'sh08000)
@@ -458,18 +398,11 @@ function signed [15:0] saturate;
     end
 endfunction
 
-// Output stage with first-order-hold interpolation to the CE rate.
-// The 218.75 kHz zero-order-hold output carried spectral images around
-// 218.75 kHz attenuated only ~20 dB by the ZOH sinc; the framework's
-// asynchronous 48 kHz sampler folded them into the audio band (audible
-// aliasing vs the software, whose FIR decimator suppresses images >80 dB).
-// Linear interpolation across the 16 CE ticks per generator sample squares
-// the sinc: images drop to ~-40 dB while in-band droop at 20 kHz is only
-// -0.24 dB. delta = (target - current)/16 is exact (16 CE per gen tick).
+// first-order hold across the 16 CE ticks of a generator sample
 reg hq_valid_r;
 reg signed [15:0] hq_l_r, hq_r_r;
-reg signed [31:0] foh_l, foh_r;          // interpolator state (Q4.28)
-reg signed [31:0] foh_dl, foh_dr;        // per-CE increment
+reg signed [31:0] foh_l, foh_r;
+reg signed [31:0] foh_dl, foh_dr;
 
 always @(posedge CLK) begin
     if (RESET_s) begin
@@ -482,7 +415,6 @@ always @(posedge CLK) begin
     else begin
         hq_valid_r <= HQ_ENABLE ? out_latch : 1'b0;
         if (out_latch && HQ_ENABLE) begin
-            // New target: step toward it over the next 16 CE ticks
             foh_dl <= (($signed(ENABLE ? final_l : 32'sd0)) - foh_l) >>> 4;
             foh_dr <= (($signed(ENABLE ? final_r : 32'sd0)) - foh_r) >>> 4;
         end

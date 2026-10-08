@@ -293,7 +293,7 @@ hps_io #(.CONF_STR(CONF_STR), .VDNUM(2)) hps_io
 	.forced_scandoubler(forced_scandoubler),
 	.new_vmode(new_vmode),
 	.status(status),
-	.status_menumask({status[42],|status[9:8],en1080p,|vcrop,~need_apply}),  // bit 4: HQ Audio Off
+	.status_menumask({status[42],|status[9:8],en1080p,|vcrop,~need_apply}),
 	.status_set(speed_set|arch_set|snap_hwset),
 	.status_in({status[63:25], speed_set ? speed_req : 3'b000, status[21:13], arch_set ? arch : snap_hwset ? snap_hw : status[12:8], status[7:0]}),
 
@@ -647,7 +647,6 @@ always @(posedge clk_aud) begin
 	ce_ym   <= !counter & ~p3;
 end
 
-// Turbosound FM: dual YM2203 chips with HQ audio pipeline
 wire        hq_valid;
 wire [15:0] hq_l, hq_r;
 
@@ -665,14 +664,9 @@ turbosound_hq turbosound
 	.PSG_MIX(status[40]),
 	.PSG_TYPE(status[41]),
 
-	// HQ configuration
-	// Option label order puts the default (status=0) first: HQ Audio and
-	// Punch default On (inverted bits). Room defaults to -9 dB and voicing to
-	// Classic, the unreal-ng defaults. Room menu: 0 = 9dB (module level 5),
-	// 1 = Off, 2..5 = 15..12dB (levels 1..4), 6 = 6dB, 7..9 = 3..1dB.
-	// Voicing menu: 0 = Classic (profile 1), 1 = Flat (profile 0), 2..5 as is.
+	// menu index 0 is the default: room 0 = -9dB (level 5), voicing 0 = Classic (1)
 	.HQ_ENABLE(~status[42]),
-	.STEREO_MODE({1'b0, status[40]}),  // ABC/ACB from existing setting
+	.STEREO_MODE({1'b0, status[40]}),
 	.PUNCH_ENABLE(~status[43]),
 	.FIR_BYPASS(status[48]),
 	.DC_BYPASS(status[50]),
@@ -683,14 +677,11 @@ turbosound_hq turbosound
 	.VOICING((status[53:51] == 3'd0) ? 3'd1 :
 	         (status[53:51] == 3'd1) ? 3'd0 :
 	                                   status[53:51]),
-	// HQ off: band-limit the legacy output (default On; Off = upstream output)
 	.LEGACY_AA(~status[54]),
 
-	// Legacy 12-bit output
 	.CHANNEL_L(ts_l),
 	.CHANNEL_R(ts_r),
 
-	// HQ 16-bit output
 	.HQ_VALID(hq_valid),
 	.HQ_L(hq_l),
 	.HQ_R(hq_r)
@@ -798,7 +789,6 @@ function [15:0] compr; input [15:0] inp;
 	end
 endfunction
 
-// Saturating clamp for the signed HQ mix
 function [15:0] sat16; input signed [17:0] v;
 	sat16 = (v > 18'sd32767) ? 16'h7FFF : (v < -18'sd32768) ? 16'h8000 : v[15:0];
 endfunction
@@ -808,16 +798,9 @@ always @(posedge clk_aud) begin
 	reg [15:0] pre_l, pre_r;
 	reg signed [17:0] hs_l, hs_r;
 
-	// ---- Legacy path: bit-identical to upstream (unsigned sum + compr) ----
 	pre_l <= {ts_l,4'd0} + {{3{gs_l[14]}}, gs_l[13:1]} + {2'b00, saa_l, 6'd0} + {3'b000, ear_out, mic_out, tape_aud, 10'd0};
 	pre_r <= {ts_r,4'd0} + {{3{gs_r[14]}}, gs_r[13:1]} + {2'b00, saa_r, 6'd0} + {3'b000, ear_out, mic_out, tape_aud, 10'd0};
 
-	// ---- HQ path: fully SIGNED sum, saturation, NO compressor ----
-	// hq_l/r are signed 16-bit (peaks ~+/-8192 from turbosound_hq's >>>14
-	// scaling); <<<1 is linear makeup gain replacing compr()'s 2x, so HQ
-	// loudness matches the legacy path without ever crossing a knee.
-	// The legacy sum instead relies on compr() and is unsigned - mixing a
-	// signed PSG into it wraps around zero (the previous integration bug).
 	hs_l <= ($signed({{2{hq_l[15]}}, hq_l}) <<< 1)
 	      + {{5{gs_l[14]}}, gs_l[13:1]}
 	      + {4'b00, saa_l, 6'd0}
